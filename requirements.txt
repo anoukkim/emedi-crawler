@@ -1,0 +1,4 @@
+PyQt6>=6.5
+selenium>=4.11
+pandas>=2.0
+openpyxl>=3.1
