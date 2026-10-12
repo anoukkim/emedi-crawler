@@ -18,7 +18,8 @@ from selenium.webdriver.chrome.options import Options
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QTextEdit, QProgressBar,
-    QFileDialog, QFrame, QTabWidget, QMessageBox, QCheckBox
+    QFileDialog, QFrame, QTabWidget, QMessageBox, QCheckBox,
+    QScrollArea, QSplitter
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QUrl
 from PyQt6.QtGui import QFont, QDesktopServices, QPainter, QLinearGradient, QColor, QIcon, QPixmap
@@ -144,6 +145,7 @@ class CrawlWorker(QObject):
         self.fast       = fast
         self._abort     = False
         self._page      = None
+        self._orig_page = 1
 
     def abort(self):
         self._abort = True
@@ -192,6 +194,11 @@ class CrawlWorker(QObject):
                 return
 
             self.log.emit(f"\n▶  상세 정보 수집 ({len(items)}건)", "section")
+            if not self.fast:
+                # 원래 코드와 동일: 1페이지로 돌아가서 시작
+                self.driver.execute_script("getList(1)")
+                self._sleep(1.5)
+                self._orig_page = 1
             t0 = time.monotonic()
             n_fail = 0
             self.stats.emit(len(items), 0, 0, "계산 중")
@@ -205,16 +212,24 @@ class CrawlWorker(QObject):
 
                 record = {k: v for k, v in item.items() if not k.startswith("_")}
                 try:
-                    self._goto_page(item["_page"])
-                    record.update(self._fetch_modal(item))
-                    self.log.emit(f"  [{idx:3d}/{len(items)}]  {permit_no}  ✓", "ok")
+                    if self.fast:
+                        self._goto_page(item["_page"])
+                        detail = self._fetch_modal(item)
+                    else:
+                        self._goto_page_original(item, idx)
+                        detail = self._fetch_modal_original(item)
+                    record.update(detail)
+                    self.log.emit(f"  [{idx:3d}/{len(items)}]  {permit_no}  ✓  ({len(detail)}개 항목)", "ok")
                 except Aborted:
                     raise
                 except Exception as e:
                     self.log.emit(f"  [{idx:3d}/{len(items)}]  {permit_no}  →  {e}", "err")
                     record["오류"] = str(e)
                 finally:
-                    self._close_modal()
+                    if self.fast:
+                        self._close_modal()
+                    else:
+                        self._close_modal_original()
                 all_records.append(record)
                 n_fail += "오류" in record
                 per = (time.monotonic() - t0) / idx
@@ -306,10 +321,76 @@ class CrawlWorker(QObject):
                     detail = None
             if detail:
                 return detail
+            self.log.emit(f"    상세 화면 확인: {self._modal_diag()}", "dim")
+            if attempt == 1:
+                break   # 빠른 방식이 안 되면 바로 원래 방식으로
             self._close_modal()
             self._sleep(1)
 
-        raise Exception(f"모달 로딩 실패 ({MAX_RETRY}회 재시도)")
+        self.log.emit("    빠른 방식 실패 → 원래 방식(고정 대기)으로 재시도", "warn")
+        self._close_modal_original()
+        return self._fetch_modal_original(item)
+
+    # ── 원래 방식 (처음 받은 코드와 동일한 동작) ──────────
+    def _goto_page_original(self, item, idx):
+        seq_num   = int(re.sub(r"\D", "", item.get("순번", "")) or str(idx))
+        item_page = (seq_num - 1) // 10 + 1
+        if item_page == self._orig_page:
+            return
+        self.driver.execute_script(f"getList({item_page})")
+        for _ in range(5):          # 페이지 로딩 대기 (최대 5초)
+            self._sleep(1)
+            if self._current_page() == item_page:
+                break
+        self._orig_page = item_page
+
+    def _fetch_modal_original(self, item):
+        ms = item["_meddevseq"]
+        tn = item["_typename"].replace("'", "\\'")
+        mp = item["_mdentpsno"]
+        fi = item["_isfirst"]
+        sg = item["_seqgroup"]
+        ix = item["_index"]
+
+        for attempt in range(1, MAX_RETRY + 2):
+            wait = RETRY_WAIT if attempt > 1 else MODAL_WAIT
+            if attempt > 1:
+                self.log.emit(f"    재시도 {attempt-1}회 ({wait}초 대기)...", "warn")
+            self._close_modal_original()
+            self._sleep(0.5)
+            self.driver.execute_script(
+                f"itemDetail('{ms}','{tn}','{ix}','{mp}','{fi}','','{sg}')")
+            self._sleep(wait)
+            detail = self.driver.execute_script(PARSE_JS) or {}
+            if not detail.get("error"):
+                return detail
+            self.log.emit(f"    상세 화면 확인: {self._modal_diag()}", "dim")
+            self._close_modal_original()
+            self._sleep(1)
+
+        raise Exception(f"상세 화면(모달)이 열리지 않음 ({MAX_RETRY}회 재시도)")
+
+    def _close_modal_original(self):
+        try:
+            self.driver.find_element(By.CSS_SELECTOR, "#modalCloseBtn").click()
+            self._sleep(0.8)
+        except Aborted:
+            raise
+        except Exception:
+            pass
+
+    def _modal_diag(self):
+        """실패 원인 파악용: 지금 화면의 모달 상태를 한 줄로"""
+        try:
+            return self.driver.execute_script("""
+                var all = document.querySelectorAll('.modal__frame');
+                var open = document.querySelector('.modal__frame.fit_modal_open');
+                var caps = open ? Array.from(open.querySelectorAll('caption')).map(function(c){return c.innerText.trim();}) : [];
+                return '모달 ' + all.length + '개, 열린 모달 ' + (open ? '있음' : '없음')
+                     + (open ? ', 표 제목: ' + (caps.join(' / ') || '없음') : '');
+            """)
+        except Exception as e:
+            return f"확인 불가 ({str(e).splitlines()[0][:80]})"
 
     def _wait_modal_settled(self, timeout):
         """모달 내용이 나타나고 MODAL_SETTLE초 동안 바뀌지 않으면 반환"""
@@ -682,8 +763,13 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.setMinimumSize(760, 860)
-        self.resize(840, 940)
+        self.setMinimumSize(640, 520)
+        # 화면 배율(125%, 150%)이 커도 창이 화면 안에 들어오게
+        avail = QApplication.primaryScreen().availableGeometry() if QApplication.primaryScreen() else None
+        w, h = 860, 960
+        if avail:
+            w, h = min(w, int(avail.width() * 0.9)), min(h, int(avail.height() * 0.9))
+        self.resize(w, h)
         self.driver   = None
         self.worker   = None
         self._threads = []  # 완료 전까지 참조 유지
@@ -707,7 +793,7 @@ class MainWindow(QMainWindow):
         # ── 헤더 ──────────────────────────────────────────
         hdr = QFrame()
         hdr.setObjectName("hdr")
-        hdr.setFixedHeight(72)
+        hdr.setFixedHeight(60)
         hdr.setStyleSheet(f"#hdr {{ background:{CARD}; border-bottom:1px solid {BORDER}; }}")
         hl = QHBoxLayout(hdr)
         hl.setContentsMargins(28,0,28,0)
@@ -715,7 +801,7 @@ class MainWindow(QMainWindow):
 
         titles = QVBoxLayout()
         titles.setSpacing(1)
-        titles.setContentsMargins(0,14,0,14)
+        titles.setContentsMargins(0,8,0,8)
         lbl_title = QLabel(APP_NAME)
         lbl_title.setStyleSheet(f"color:{TEXT}; font-size:16px; font-weight:800;")
         lbl_sub = QLabel("의료기기 허가정보 수집 · 병합  ·  emedi.mfds.go.kr")
@@ -751,7 +837,16 @@ class MainWindow(QMainWindow):
         """)
         self.tabs.addTab(self._build_tab1(), "①  크롤링")
         self.tabs.addTab(self._build_tab2(), "②  허가사항 병합")
-        root.addWidget(self.tabs, 1)
+        # 위(탭)는 스크롤 가능, 아래(진행 + 로그)와의 경계는 끌어서 조절 가능
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet(f"QScrollArea {{ background:{BG}; border:none; }}")
+        scroll.setWidget(self.tabs)
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setHandleWidth(6)
+        splitter.setStyleSheet(f"QSplitter::handle {{ background:{BORDER}; }} QSplitter::handle:hover {{ background:{PRIMARY}; }}")
+        splitter.addWidget(scroll)
 
         # ── 하단 공통: 진행 상황 + 로그 ─────────────────────
         bottom = QFrame()
@@ -791,11 +886,11 @@ class MainWindow(QMainWindow):
 
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
-        self.log_box.setMinimumHeight(150)
+        self.log_box.setMinimumHeight(120)
         self.log_box.setStyleSheet(f"""
             QTextEdit {{
-                background:{DARK_LOG}; color:#94A3B8;
-                font-family:Menlo,Consolas,monospace; font-size:11px;
+                background:{DARK_LOG}; color:#E2E8F0;
+                font-family:Consolas,Menlo,"맑은 고딕",monospace; font-size:12px;
                 border-radius:10px; border:none; padding:10px;
             }}
             QScrollBar:vertical {{ background:transparent; width:8px; margin:4px 2px; }}
@@ -810,34 +905,42 @@ class MainWindow(QMainWindow):
         credit.setStyleSheet(f"color:{MUTED}; font-size:9px;")
         bl.addWidget(credit)
 
-        root.addWidget(bottom)
+        splitter.addWidget(bottom)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        self.splitter = splitter
+        root.addWidget(splitter, 1)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if not getattr(self, "_sized", False):
+            # 처음 열 때: 위쪽엔 필요한 만큼(최대 62%), 나머지는 로그
+            self._sized = True
+            total = self.splitter.height()
+            top = min(self.tabs.sizeHint().height() + 8, int(total * 0.62))
+            self.splitter.setSizes([top, max(total - top, 180)])
 
     # ── 탭 1: 크롤링 ──────────────────────────────────────
     def _build_tab1(self):
         w = QWidget()
         layout = QVBoxLayout(w)
-        layout.setContentsMargins(24,16,24,16)
-        layout.setSpacing(14)
+        layout.setContentsMargins(24,12,24,12)
+        layout.setSpacing(12)
 
-        # STEP 1
-        card1, c1 = self._card("1", "사이트 열기",
-            "크롬이 열리면 검색 조건을 입력하고 검색하세요.")
-        self.btn_open = self._btn("크롬 열기", PRIMARY, self._open_site)
-        c1.addWidget(self.btn_open)
-        layout.addWidget(card1)
-
-        # STEP 2
-        card2, c2 = self._card("2", "크롤링",
-            "검색 결과 목록이 보이면 시작하세요. "
+        card2, c2 = self._card("↓", "크롤링",
+            "① 크롬 열기 → 사이트에서 검색 → ② 크롤링 시작.  "
             f"실패한 항목은 최대 {MAX_RETRY}회 재시도하고, 중단해도 모은 데이터는 저장됩니다.")
+        self.btn_open = self._btn("① 크롬 열기", PRIMARY, self._open_site)
         self.crawl_output, self.crawl_name = self._save_fields(c2, default_crawl_name())
 
-        self.chk_fast = QCheckBox("빠른 모드")
-        self.chk_fast.setChecked(True)
-        self.chk_fast.setToolTip("켜짐: 상세 정보가 뜨면 바로 수집 (권장)\n"
-                                 "꺼짐: 항목마다 10초씩 고정 대기 (예전 방식, 느리지만 확실)")
+        self.chk_fast = QCheckBox("빠른 모드 (실험적)")
+        self.chk_fast.setChecked(False)
+        self.chk_fast.setToolTip("꺼짐 (기본): 원래 방식. 항목마다 상세 화면을 열고 10초 기다린 뒤 읽음\n"
+                                 "켜짐: 상세 화면이 뜨면 바로 읽음. 실패하면 그 항목은 원래 방식으로 다시 시도")
         self.chk_fast.setStyleSheet(f"QCheckBox {{ color:{TEXT}; font-size:11px; font-weight:600; spacing:8px; }}")
-        fast_hint = QLabel("끄면 예전처럼 항목당 10초 고정 대기")
+        fast_hint = QLabel("기본은 원래 방식 (항목당 약 11초)")
         fast_hint.setStyleSheet(f"color:{MUTED}; font-size:10px;")
         row_fast = QHBoxLayout()
         row_fast.addWidget(self.chk_fast)
@@ -847,13 +950,14 @@ class MainWindow(QMainWindow):
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
-        self.btn_crawl = self._btn("▶  크롤링 시작", SUCCESS, self._start_crawl)
+        self.btn_crawl = self._btn("② 크롤링 시작", SUCCESS, self._start_crawl)
         self.btn_crawl.setEnabled(False)
         self.btn_stop = self._btn("■  중단", DANGER, self._stop_crawl)
         self.btn_stop.setEnabled(False)
         self.btn_crawl_open = self._ghost_btn("파일 열기", lambda: self._open_path(self._last_crawl_file))
         self.btn_crawl_dir  = self._ghost_btn("폴더 열기",
             lambda: self._open_path(Path(self._last_crawl_file).parent if self._last_crawl_file else None))
+        btn_row.addWidget(self.btn_open, 3)
         btn_row.addWidget(self.btn_crawl, 3)
         btn_row.addWidget(self.btn_stop, 2)
         btn_row.addWidget(self.btn_crawl_open, 2)
@@ -963,8 +1067,8 @@ class MainWindow(QMainWindow):
         card.setObjectName("card")
         card.setStyleSheet(f"#card {{ background:{CARD}; border:1px solid {BORDER}; border-radius:14px; }}")
         v = QVBoxLayout(card)
-        v.setContentsMargins(22,18,22,20)
-        v.setSpacing(10)
+        v.setContentsMargins(20,14,20,16)
+        v.setSpacing(8)
 
         row = QHBoxLayout()
         badge = QLabel(badge_text)
@@ -995,12 +1099,12 @@ class MainWindow(QMainWindow):
         t.setObjectName("tile")
         t.setStyleSheet(f"#tile {{ background:{BG}; border:1px solid {BORDER}; border-radius:10px; }}")
         v = QVBoxLayout(t)
-        v.setContentsMargins(14,10,14,10)
-        v.setSpacing(2)
+        v.setContentsMargins(12,6,12,6)
+        v.setSpacing(0)
         cap = QLabel(label)
         cap.setStyleSheet(f"color:{MUTED}; font-size:10px; font-weight:700;")
         val = QLabel(value)
-        val.setStyleSheet(f"color:{color}; font-size:20px; font-weight:800;")
+        val.setStyleSheet(f"color:{color}; font-size:17px; font-weight:800;")
         v.addWidget(cap)
         v.addWidget(val)
         t.value = val
@@ -1008,7 +1112,7 @@ class MainWindow(QMainWindow):
 
     def _btn(self, text, color, slot):
         b = QPushButton(text)
-        b.setFixedHeight(42)
+        b.setFixedHeight(38)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         b.setStyleSheet(f"""
             QPushButton {{
@@ -1025,7 +1129,7 @@ class MainWindow(QMainWindow):
 
     def _ghost_btn(self, text, slot):
         b = QPushButton(text)
-        b.setFixedHeight(42)
+        b.setFixedHeight(38)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         b.setStyleSheet(f"""
             QPushButton {{
@@ -1206,7 +1310,7 @@ class MainWindow(QMainWindow):
     def _crawl_done(self, ok, msg):
         self.worker = None
         self.btn_crawl.setEnabled(True)
-        self.btn_crawl.setText("▶  크롤링 시작")
+        self.btn_crawl.setText("② 크롤링 시작")
         self.btn_stop.setEnabled(False)
         self.chk_fast.setEnabled(True)
         saved = msg.splitlines()[-1]
@@ -1275,12 +1379,12 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def _log(self, msg, level=""):
-        colors = {"ok":"#5EEAD4","err":"#FCA5A5","warn":"#FCD34D",
-                  "section":"#A5B4FC","dim":"#64748B","":"#94A3B8"}
+        colors = {"ok":"#6EE7B7","err":"#FCA5A5","warn":"#FDE68A",
+                  "section":"#C7D2FE","dim":"#CBD5E1","":"#E2E8F0"}
         c = colors.get(level,"#94A3B8")
         safe = html.escape(msg).replace("\n", "<br>")
         self.log_box.append(
-            f'<span style="color:{c};font-family:Menlo,Consolas,monospace;">{safe}</span>')
+            f'<span style="color:{c};">{safe}</span>')
         self.log_box.verticalScrollBar().setValue(
             self.log_box.verticalScrollBar().maximum())
         try:

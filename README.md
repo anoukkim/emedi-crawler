@@ -9,7 +9,9 @@ Built with PyQt6 and Selenium. Works on Windows and macOS.
 ## Features
 
 - **① 크롤링:** open Chrome from the app, search on the site as usual, then press start. The app walks every result page, opens each item's detail popup, and saves everything to `.xlsx` and `.json`.
-  - Fast mode waits only until each popup has loaded. Untick it to use a fixed 10-second wait per item.
+  - By default each popup is read after a fixed 10-second wait, the proven original method.
+  - Optional **빠른 모드 (실험적)** reads a popup as soon as it has loaded. If that fails for an item, the item is retried with the original method.
+  - When an item fails, the log shows what the popup looked like, which helps find the cause.
   - Failed items are retried, and stopping or a crash still saves what was collected.
   - Live progress: total, done, failed, time left.
 - **② 허가사항 병합:** adds the columns from 전자민원's 품목 허가(신고)사항 export to the crawl result, matched by permit number, as a formatted Excel file.
@@ -51,7 +53,7 @@ Wait times are constants at the top of `app.py`:
 | `MODAL_TIMEOUT` | 20 s | Max wait for a detail popup |
 | `MODAL_SETTLE` | 1.0 s | Popup content must stay unchanged this long to count as loaded |
 | `POLITE_DELAY` | 0.3 s | Pause between items, to be gentle on the site |
-| `MODAL_WAIT` | 10 s | Fixed wait used when fast mode is off |
+| `MODAL_WAIT` | 10 s | Fixed wait per item (default mode) |
 
 ## Notes
 
