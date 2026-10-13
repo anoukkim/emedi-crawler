@@ -53,6 +53,7 @@ POLITE_DELAY  = 0.3    # 항목 사이 쉬는 시간 (서버 부담 줄이기)
 MODAL_WAIT = 10
 RETRY_WAIT = 20
 MAX_RETRY  = 2
+EMPTY_WAIT = 10    # 모달 내용이 비어 있으면 추가로 기다리는 시간 (초)
 
 LIST_COLS = [
     "순번","업체명","품목명","품목허가번호","품목등급","품목상태","취소취하일자",
@@ -244,6 +245,39 @@ class CrawlWorker(QObject):
                 if self.fast:
                     self._sleep(POLITE_DELAY)
 
+            # ── 실패한 항목은 마지막에 한 번 더 시도 ──
+            failed_idx = [i for i, r in enumerate(all_records) if "오류" in r]
+            if failed_idx:
+                self.log.emit(f"\n▶  실패한 {len(failed_idx)}건 다시 시도", "section")
+                for n, i in enumerate(failed_idx, 1):
+                    if self._abort:
+                        raise Aborted()
+                    item = items[i]
+                    permit_no = item.get("품목허가번호", f"row_{i+1}")
+                    self.status.emit(f"[다시 시도 {n}/{len(failed_idx)}]  {permit_no}")
+                    try:
+                        if self.fast:
+                            self._goto_page(item["_page"])
+                            detail = self._fetch_modal(item)
+                        else:
+                            self._goto_page_original(item, i + 1)
+                            detail = self._fetch_modal_original(item)
+                        record = {k: v for k, v in item.items() if not k.startswith("_")}
+                        record.update(detail)
+                        all_records[i] = record
+                        self.log.emit(f"  {permit_no}  ✓  ({len(detail)}개 항목)", "ok")
+                    except Aborted:
+                        raise
+                    except Exception as e:
+                        self.log.emit(f"  {permit_no}  →  {e}", "err")
+                    finally:
+                        if self.fast:
+                            self._close_modal()
+                        else:
+                            self._close_modal_original()
+                n_fail = sum(1 for r in all_records if "오류" in r)
+                self.stats.emit(len(items), len(items) - n_fail, n_fail, "0초")
+
             finished = True
 
         except Aborted:
@@ -362,13 +396,19 @@ class CrawlWorker(QObject):
                 f"itemDetail('{ms}','{tn}','{ix}','{mp}','{fi}','','{sg}')")
             self._sleep(wait)
             detail = self.driver.execute_script(PARSE_JS) or {}
-            if not detail.get("error"):
+            if not detail.get("error") and not detail:
+                # 모달은 열렸는데 내용이 아직 없음 (사이트가 느릴 때) → 최대 EMPTY_WAIT초 더 기다림
+                detail = self._wait_until(
+                    lambda: (self.driver.execute_script(PARSE_JS) or {}) or None, EMPTY_WAIT) or {}
+            if detail and not detail.get("error"):
                 return detail
             self.log.emit(f"    상세 화면 확인: {self._modal_diag()}", "dim")
             self._close_modal_original()
             self._sleep(1)
 
-        raise Exception(f"상세 화면(모달)이 열리지 않음 ({MAX_RETRY}회 재시도)")
+        if detail.get("error"):
+            raise Exception(f"상세 화면(모달)이 열리지 않음 ({MAX_RETRY}회 재시도)")
+        raise Exception(f"상세 화면은 열렸지만 내용이 비어 있음 ({MAX_RETRY}회 재시도)")
 
     def _close_modal_original(self):
         try:
@@ -385,9 +425,11 @@ class CrawlWorker(QObject):
             return self.driver.execute_script("""
                 var all = document.querySelectorAll('.modal__frame');
                 var open = document.querySelector('.modal__frame.fit_modal_open');
-                var caps = open ? Array.from(open.querySelectorAll('caption')).map(function(c){return c.innerText.trim();}) : [];
+                var caps = open ? Array.from(open.querySelectorAll('caption')).map(function(c){return c.textContent.trim();}) : [];
+                var nt = open ? open.querySelectorAll('table').length : 0;
+                var head = open ? open.textContent.replace(/\\s+/g, ' ').trim().slice(0, 60) : '';
                 return '모달 ' + all.length + '개, 열린 모달 ' + (open ? '있음' : '없음')
-                     + (open ? ', 표 제목: ' + (caps.join(' / ') || '없음') : '');
+                     + (open ? ', 표 ' + nt + '개, 표 제목: ' + (caps.join(' / ') || '없음') + ', 내용: ' + head : '');
             """)
         except Exception as e:
             return f"확인 불가 ({str(e).splitlines()[0][:80]})"
