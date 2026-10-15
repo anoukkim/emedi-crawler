@@ -1034,7 +1034,7 @@ class MainWindow(QMainWindow):
         self.log_table.setStyleSheet(f"""
             QTableWidget {{ background:white; border:0; color:{TEXT}; font-family:{MONO}; font-size:13px; }}
             QHeaderView::section {{ background:{LABEL_BG}; color:{MUTED}; border:0; border-bottom:1px solid {TEXT};
-                padding-left:28px; font-family:{MONO}; font-size:11px; letter-spacing:1px; text-align:left; }}
+                padding:0 26px; font-family:{MONO}; font-size:11px; letter-spacing:1px; }}
         """)
         root.addWidget(self.log_table, 1)
 
@@ -1723,8 +1723,8 @@ def load_ui_fonts():
     """설치 여부에 의존하지 않도록 SIL OFL 글꼴을 앱에 등록한다."""
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "fonts"
     for name in (
-        "IBMPlexSansKR-Regular.woff", "IBMPlexSansKR-Medium.woff", "IBMPlexSansKR-Bold.woff",
-        "IBMPlexMono-Regular.woff", "IBMPlexMono-Medium.woff", "IBMPlexMono-SemiBold.woff",
+        "IBMPlexSansKR-Regular.ttf", "IBMPlexSansKR-Medium.ttf", "IBMPlexSansKR-Bold.ttf",
+        "IBMPlexMono-Regular.ttf", "IBMPlexMono-Medium.ttf", "IBMPlexMono-SemiBold.ttf",
     ):
         if (base / name).is_file():
             QFontDatabase.addApplicationFont(str(base / name))
