@@ -15,30 +15,33 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 
+from recovery import build_recovery_plan, detail_complete, load_existing_records
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QTextEdit, QProgressBar,
-    QFileDialog, QFrame, QTabWidget, QMessageBox, QCheckBox,
-    QScrollArea, QSplitter
+    QFileDialog, QFrame, QStackedWidget, QMessageBox, QCheckBox,
+    QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView,
+    QAbstractItemView, QSizePolicy, QStyledItemDelegate, QStyleOptionViewItem
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QUrl
-from PyQt6.QtGui import QFont, QDesktopServices, QPainter, QLinearGradient, QColor, QIcon, QPixmap
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QUrl, QEvent
+from PyQt6.QtGui import QFont, QFontDatabase, QDesktopServices, QColor, QPainter
 
 # ── Colors ────────────────────────────────────────────────
 APP_NAME  = "eMedi 허가정보 수집기"
 APP_DATE  = "2026-10"
-PRIMARY   = "#4F46E5"   # indigo
-PRIMARY_2 = "#7C3AED"   # violet (그라데이션 끝색)
-SOFT      = "#EEF2FF"   # primary 연한 배경
-ACCENT    = "#06B6D4"   # cyan
-SUCCESS   = "#10B981"
-DANGER    = "#EF4444"
-BG        = "#F6F7FB"
-CARD      = "#FFFFFF"
-BORDER    = "#E5E7EB"
-TEXT      = "#111827"
-MUTED     = "#6B7280"
-DARK_LOG  = "#0F172A"
+PRIMARY   = "#0047ff"
+SUCCESS   = "#00994f"
+DANGER    = "#e5281b"
+BG        = "#ffffff"
+CARD      = "#ffffff"
+BORDER    = "#0a0a0a"
+ROW_BORDER = "#e3e3e3"
+TEXT      = "#0a0a0a"
+MUTED     = "#5c5c5c"
+FAINT     = "#9a9a9a"
+MONO      = '"IBM Plex Mono", "Consolas", "Menlo", monospace'
+SANS      = '"IBM Plex Sans KR", "Malgun Gothic", "맑은 고딕", "Apple SD Gothic Neo", sans-serif'
 
 BASE_URL   = "https://emedi.mfds.go.kr/search/data/MNU20237"
 
@@ -137,13 +140,16 @@ class CrawlWorker(QObject):
     progress = pyqtSignal(int)
     stats    = pyqtSignal(int, int, int, str)   # 전체, 완료, 실패, 남은 시간
     done     = pyqtSignal(bool, str)
+    row_event = pyqtSignal(int, str, int, str)  # 순번, 허가번호, 항목 수, RUN/OK/FAIL
+    checkpoint = pyqtSignal(int)
 
-    def __init__(self, driver, output_dir, file_name, fast=True):
+    def __init__(self, driver, output_dir, file_name, fast=True, existing_file=None):
         super().__init__()
         self.driver     = driver
         self.output_dir = Path(output_dir)
         self.file_name  = clean_file_name(file_name, default_crawl_name())
         self.fast       = fast
+        self.existing_file = existing_file
         self._abort     = False
         self._page      = None
         self._orig_page = 1
@@ -183,9 +189,13 @@ class CrawlWorker(QObject):
 
     def run(self):
         all_records, items, finished = [], [], False
-        partial_path = self.output_dir / f"{self.file_name}_partial.json"
+        fatal_error = ""
+        partial_path = unique_path(self.output_dir / f"{self.file_name}_partial.json")
         try:
             self.output_dir.mkdir(parents=True, exist_ok=True)
+            existing = load_existing_records(self.existing_file) if self.existing_file else []
+            if existing:
+                self.log.emit(f"▶  기존 결과 {len(existing)}건 불러옴: {self.existing_file}", "section")
             mode = "빠른 모드" if self.fast else "안전 모드 (고정 대기)"
             self.log.emit(f"▶  목록 수집 시작  ·  {mode}", "section")
             items = self._collect_all_list()
@@ -194,24 +204,31 @@ class CrawlWorker(QObject):
                 self.done.emit(False, "목록이 비어 있습니다. 검색 결과가 보이는지 확인하세요.")
                 return
 
-            self.log.emit(f"\n▶  상세 정보 수집 ({len(items)}건)", "section")
-            if not self.fast:
+            all_records, queue, overlap, old_only = build_recovery_plan(items, existing, LIST_COLS)
+            self.log.emit(f"  기존 목록 일치 {overlap}건 · 상세 재수집 {len(queue)}건 · 이미 완료되어 건너뜀 {len(items)-len(queue)}건", "ok")
+            if old_only:
+                self.log.emit(f"  ⚠  현재 목록에 없는 기존 {old_only}건도 결과에 보존합니다.", "warn")
+
+            self.log.emit(f"\n▶  상세 정보 수집 ({len(queue)}건)", "section")
+            if not self.fast and queue:
                 # 원래 코드와 동일: 1페이지로 돌아가서 시작
                 self.driver.execute_script("getList(1)")
                 self._sleep(1.5)
                 self._orig_page = 1
             t0 = time.monotonic()
-            n_fail = 0
-            self.stats.emit(len(items), 0, 0, "계산 중")
+            self.stats.emit(len(all_records), sum(detail_complete(r) for r in all_records),
+                            sum(r.get("오류", "") not in ("", "상세 정보 미수집") for r in all_records), "계산 중")
 
-            for idx, item in enumerate(items, 1):
+            for step, i in enumerate(queue, 1):
+                idx, item = i + 1, items[i]
                 if self._abort:
                     raise Aborted()
                 permit_no = item.get("품목허가번호", f"row_{idx}")
                 self.status.emit(f"[{idx}/{len(items)}]  {permit_no} 수집 중")
-                self.progress.emit(int(idx / len(items) * 95))
+                self.row_event.emit(idx, permit_no, 0, "RUN")
+                self.progress.emit(int((len(items)-len(queue)+step) / len(items) * 95))
 
-                record = {k: v for k, v in item.items() if not k.startswith("_")}
+                record = all_records[i]
                 try:
                     if self.fast:
                         self._goto_page(item["_page"])
@@ -220,33 +237,37 @@ class CrawlWorker(QObject):
                         self._goto_page_original(item, idx)
                         detail = self._fetch_modal_original(item)
                     record.update(detail)
+                    record.pop("오류", None)
                     self.log.emit(f"  [{idx:3d}/{len(items)}]  {permit_no}  ✓  ({len(detail)}개 항목)", "ok")
+                    self.row_event.emit(idx, permit_no, len(detail), "OK")
                 except Aborted:
                     raise
                 except Exception as e:
                     self.log.emit(f"  [{idx:3d}/{len(items)}]  {permit_no}  →  {e}", "err")
+                    self.row_event.emit(idx, permit_no, 0, "FAIL")
                     record["오류"] = str(e)
                 finally:
                     if self.fast:
                         self._close_modal()
                     else:
                         self._close_modal_original()
-                all_records.append(record)
-                n_fail += "오류" in record
-                per = (time.monotonic() - t0) / idx
-                left = int(per * (len(items) - idx))
+                per = (time.monotonic() - t0) / step
+                left = int(per * (len(queue) - step))
                 eta = f"{left // 60}분" if left >= 60 else f"{left}초"
-                self.stats.emit(len(items), idx - n_fail, n_fail, eta)
+                self.stats.emit(len(all_records), sum(detail_complete(r) for r in all_records),
+                                sum(r.get("오류", "") not in ("", "상세 정보 미수집") for r in all_records), eta)
 
-                if idx % 25 == 0:
+                if self.existing_file or step % 25 == 0:
                     self._save_json(all_records, partial_path)
-                    self.log.emit(f"  ★ 중간 저장 ({idx}건)", "dim")
+                    if step % 25 == 0 or self.existing_file and step == 1:
+                        self.log.emit(f"  ★ 중간 저장: {partial_path}", "dim")
+                        self.checkpoint.emit(sum(detail_complete(r) for r in all_records))
 
                 if self.fast:
                     self._sleep(POLITE_DELAY)
 
             # ── 실패한 항목은 마지막에 한 번 더 시도 ──
-            failed_idx = [i for i, r in enumerate(all_records) if "오류" in r]
+            failed_idx = [i for i in queue if not detail_complete(all_records[i])]
             if failed_idx:
                 self.log.emit(f"\n▶  실패한 {len(failed_idx)}건 다시 시도", "section")
                 for n, i in enumerate(failed_idx, 1):
@@ -255,6 +276,7 @@ class CrawlWorker(QObject):
                     item = items[i]
                     permit_no = item.get("품목허가번호", f"row_{i+1}")
                     self.status.emit(f"[다시 시도 {n}/{len(failed_idx)}]  {permit_no}")
+                    self.row_event.emit(i + 1, permit_no, 0, "RUN")
                     try:
                         if self.fast:
                             self._goto_page(item["_page"])
@@ -262,34 +284,39 @@ class CrawlWorker(QObject):
                         else:
                             self._goto_page_original(item, i + 1)
                             detail = self._fetch_modal_original(item)
-                        record = {k: v for k, v in item.items() if not k.startswith("_")}
+                        record = all_records[i]
                         record.update(detail)
-                        all_records[i] = record
+                        record.pop("오류", None)
                         self.log.emit(f"  {permit_no}  ✓  ({len(detail)}개 항목)", "ok")
+                        self.row_event.emit(i + 1, permit_no, len(detail), "OK")
                     except Aborted:
                         raise
                     except Exception as e:
                         self.log.emit(f"  {permit_no}  →  {e}", "err")
+                        self.row_event.emit(i + 1, permit_no, 0, "FAIL")
                     finally:
                         if self.fast:
                             self._close_modal()
                         else:
                             self._close_modal_original()
-                n_fail = sum(1 for r in all_records if "오류" in r)
-                self.stats.emit(len(items), len(items) - n_fail, n_fail, "0초")
+                    if self.existing_file:
+                        self._save_json(all_records, partial_path)
+                n_fail = sum(not detail_complete(r) for r in all_records)
+                self.stats.emit(len(all_records), len(all_records) - n_fail, n_fail, "0초")
 
             finished = True
 
         except Aborted:
-            self.log.emit(f"\n⏹  중단됨 ({len(all_records)}건 수집 완료)", "warn")
+            self.log.emit(f"\n⏹  중단됨 (상세 수집 완료 {sum(detail_complete(r) for r in all_records)}건)", "warn")
         except Exception as e:
+            fatal_error = str(e)
             self.log.emit(f"\n❌  오류: {e}", "err")
             self.log.emit(traceback.format_exc(), "dim")
 
         # ── 어떤 경우든 지금까지 모은 데이터는 저장 ──
         if not all_records:
             if not finished:
-                self.done.emit(False, "저장할 데이터가 없습니다.")
+                self.done.emit(False, fatal_error or "저장할 데이터가 없습니다.")
             return
         try:
             self.log.emit("\n▶  엑셀 변환 중", "section")
@@ -301,14 +328,20 @@ class CrawlWorker(QObject):
             self.done.emit(False, f"저장 실패: {e}")
             return
 
-        failed = sum(1 for r in all_records if "오류" in r)
-        if failed:
-            self.log.emit(f"  ⚠  실패 {failed}건 → 엑셀의 '오류' 열 확인", "warn")
-        self.progress.emit(100)
+        missing = sum(not detail_complete(r) for r in all_records)
+        failed = sum(r.get("오류", "") not in ("", "상세 정보 미수집") for r in all_records)
+        if missing:
+            self.log.emit(f"  ⚠  상세 누락 {missing}건 (실패 {failed}건, 미시도 {missing-failed}건) → 누락분만 수집 가능", "warn")
+        complete = sum(detail_complete(r) for r in all_records)
+        self.stats.emit(len(all_records), complete, failed, "0초" if finished else "중단")
+        if finished:
+            self.progress.emit(100)
+        else:
+            self.progress.emit(int(complete / len(all_records) * 100))
         if finished:
             self.done.emit(True, str(xlsx))
         else:
-            self.done.emit(False, f"중단됨 ({len(all_records)}건 저장됨)\n{xlsx}")
+            self.done.emit(False, f"중단됨 ({sum(detail_complete(r) for r in all_records)}건 상세 수집 완료, {len(all_records)}건 저장됨)\n{xlsx}")
 
     # ── 페이지 이동 ───────────────────────────────────────
     def _current_page(self):
@@ -353,7 +386,7 @@ class CrawlWorker(QObject):
                 detail = self.driver.execute_script(PARSE_JS) or {}
                 if detail.get("error"):
                     detail = None
-            if detail:
+            if detail_complete(detail):
                 return detail
             self.log.emit(f"    상세 화면 확인: {self._modal_diag()}", "dim")
             if attempt == 1:
@@ -400,7 +433,7 @@ class CrawlWorker(QObject):
                 # 모달은 열렸는데 내용이 아직 없음 (사이트가 느릴 때) → 최대 EMPTY_WAIT초 더 기다림
                 detail = self._wait_until(
                     lambda: (self.driver.execute_script(PARSE_JS) or {}) or None, EMPTY_WAIT) or {}
-            if detail and not detail.get("error"):
+            if detail_complete(detail):
                 return detail
             self.log.emit(f"    상세 화면 확인: {self._modal_diag()}", "dim")
             self._close_modal_original()
@@ -408,7 +441,7 @@ class CrawlWorker(QObject):
 
         if detail.get("error"):
             raise Exception(f"상세 화면(모달)이 열리지 않음 ({MAX_RETRY}회 재시도)")
-        raise Exception(f"상세 화면은 열렸지만 내용이 비어 있음 ({MAX_RETRY}회 재시도)")
+        raise Exception(f"상세 화면이 비어 있거나 내용이 불완전함 ({MAX_RETRY}회 재시도)")
 
     def _close_modal_original(self):
         try:
@@ -497,7 +530,10 @@ class CrawlWorker(QObject):
                     item[f"_{k}"] = attrs.get(k, "")
                 item["_page"] = page  # 상세 수집 때 이 페이지로 이동
                 items.append(item)
-            if not items: break
+            if not items:
+                if last:
+                    raise Exception(f"{page}페이지 목록이 비어 있습니다. 네트워크/사이트 로딩 후 다시 시도하세요.")
+                break
             all_items.extend(items)
             self.log.emit(f"  페이지 {page:3d}: {len(items):2d}건  (누적 {len(all_items):4d}건)", "dim")
             if last and page >= last: break
@@ -599,8 +635,9 @@ def format_excel(ws, df, highlight_cols=None):
     )
     from openpyxl.utils import get_column_letter
 
-    HEADER      = PRIMARY.lstrip("#")
-    HEADER_HL   = ACCENT.lstrip("#")
+    # 산출물의 기존 Excel 색상은 데스크톱 UI 리스타일과 무관하게 유지한다.
+    HEADER      = "4F46E5"
+    HEADER_HL   = "06B6D4"
     HIGHLIGHT   = "ECFEFF"   # 전자민원 컬럼 배경
     ROW_EVEN    = "F8FAFC"   # 짝수행
     ROW_ODD     = "FFFFFF"   # 홀수행
@@ -733,7 +770,7 @@ class MergeWorker(QObject):
             wb.save(out)
             self.log.emit(f"  ✓  최종 저장: {out}", "ok")
             self.progress.emit(100)
-            self.status.emit("완료 ✓")
+            self.status.emit("완료")
             self.done.emit(True, str(out))
 
         except Exception as e:
@@ -748,12 +785,16 @@ class ChromeOpener(QObject):
     def run(self):
         try:
             opts = Options()
-            opts.add_argument("--window-size=1440,900")
+            opts.add_argument("--start-maximized")
             opts.add_argument("--lang=ko-KR")
             # Selenium 4.11+ 내장 Selenium Manager가 크롬 버전에 맞는 드라이버를 자동으로 받음
             driver = webdriver.Chrome(options=opts)
             driver.implicitly_wait(0)   # 대기는 코드에서 직접 처리 (암묵적 대기는 느려짐)
             driver.get(BASE_URL)
+            try:
+                driver.maximize_window()
+            except Exception:
+                pass  # 창 관리자에서 최대화를 지원하지 않아도 연결 자체는 유지
             self.done.emit(driver, "")
         except Exception as e:
             self.done.emit(None, str(e).splitlines()[0] if str(e) else repr(e))
@@ -762,29 +803,6 @@ class ChromeOpener(QObject):
 # ═══════════════════════════════════════════════════════════
 # Main Window
 # ═══════════════════════════════════════════════════════════
-class AppLogo(QWidget):
-    """헤더 왼쪽 앱 아이콘 (그라데이션 둥근 사각형)"""
-    def __init__(self, size=38):
-        super().__init__()
-        self.setFixedSize(size, size)
-
-    def paintEvent(self, e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        g = QLinearGradient(0, 0, self.width(), self.height())
-        g.setColorAt(0, QColor(PRIMARY))
-        g.setColorAt(1, QColor(PRIMARY_2))
-        p.setBrush(g)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(self.rect(), 10, 10)
-        p.setPen(QColor("white"))
-        f = QFont(self.font())
-        f.setPixelSize(int(self.height() * 0.5))
-        f.setBold(True)
-        p.setFont(f)
-        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "e")
-
-
 class DropLineEdit(QLineEdit):
     """파일을 끌어다 놓으면 경로가 입력되는 입력칸"""
     def __init__(self, *a, **kw):
@@ -801,401 +819,518 @@ class DropLineEdit(QLineEdit):
             self.setText(urls[0].toLocalFile())
 
 
+class TitleBar(QFrame):
+    """장식 없는 창도 제목 영역에서 이동/최대화할 수 있게 한다."""
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            handle = self.window().windowHandle()
+            if handle and handle.startSystemMove():
+                event.accept()
+                return
+            self.window()._drag_offset = event.globalPosition().toPoint() - self.window().frameGeometry().topLeft()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        window = self.window()
+        if window._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton and not window.isMaximized():
+            window.move(event.globalPosition().toPoint() - window._drag_offset)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self.window()._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        self.window()._toggle_maximize()
+        event.accept()
+
+
+class RuledRowDelegate(QStyledItemDelegate):
+    """행 배경은 상태별로 유지하면서 얇은 가로선을 그린다."""
+    def paint(self, painter, option, index):
+        painter.fillRect(option.rect, index.data(Qt.ItemDataRole.BackgroundRole) or QColor("white"))
+        inset = QStyleOptionViewItem(option)
+        inset.rect = option.rect.adjusted(26 if index.column() != 3 else 0, 0,
+                                          -26 if index.column() == 3 else 0, 0)
+        super().paint(painter, inset, index)
+        painter.save()
+        painter.setPen(QColor(ROW_BORDER))
+        painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
+        painter.restore()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.setMinimumSize(640, 520)
-        # 화면 배율(125%, 150%)이 커도 창이 화면 안에 들어오게
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+        self.setMinimumSize(840, 620)
         avail = QApplication.primaryScreen().availableGeometry() if QApplication.primaryScreen() else None
-        w, h = 860, 960
+        w, h = 1264, 1180
         if avail:
-            w, h = min(w, int(avail.width() * 0.9)), min(h, int(avail.height() * 0.9))
+            w, h = min(w, int(avail.width() * 0.96)), min(h, int(avail.height() * 0.94))
         self.resize(w, h)
         self.driver   = None
         self.worker   = None
         self._threads = []  # 완료 전까지 참조 유지
         self._last_crawl_file = None
         self._last_merge_file = None
+        self._drag_offset = None
+        self._active_log_row = None
         self._build_ui()
+        QApplication.instance().installEventFilter(self)
 
     def _build_ui(self):
         central = QWidget()
         central.setObjectName("central")
         central.setStyleSheet(f"""
-            #central {{ background:{BG}; }}
+            #central {{ background:white; border:1px solid {TEXT}; }}
             QLabel {{ background:transparent; }}
-            QToolTip {{ background:{TEXT}; color:white; border:none; padding:6px; border-radius:6px; }}
+            QToolTip {{ background:{TEXT}; color:white; border:1px solid {TEXT}; padding:6px; border-radius:0; }}
+            QScrollBar:vertical {{ background:white; width:9px; border-left:1px solid {ROW_BORDER}; }}
+            QScrollBar::handle:vertical {{ background:{MUTED}; min-height:25px; border-radius:0; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background:white; }}
         """)
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
         root.setContentsMargins(0,0,0,0)
         root.setSpacing(0)
 
-        # ── 헤더 ──────────────────────────────────────────
-        hdr = QFrame()
-        hdr.setObjectName("hdr")
-        hdr.setFixedHeight(60)
-        hdr.setStyleSheet(f"#hdr {{ background:{CARD}; border-bottom:1px solid {BORDER}; }}")
-        hl = QHBoxLayout(hdr)
-        hl.setContentsMargins(28,0,28,0)
-        hl.setSpacing(12)
+        # 검은 앱 타이틀 바 (기본 창 장식 대신 드래그/최소화/최대화/닫기 제공)
+        title = TitleBar()
+        title.setObjectName("titleStrip")
+        title.setFixedHeight(36)
+        title.setStyleSheet(f"#titleStrip {{ background:{TEXT}; color:white; }}")
+        tl = QHBoxLayout(title)
+        tl.setContentsMargins(28, 0, 0, 0)
+        tl.setSpacing(0)
+        cap = QLabel("EMEDI / 허가정보 수집기 — v1.0")
+        cap.setStyleSheet(f"color:white; font-family:{MONO}; font-size:13px;")
+        tl.addWidget(cap)
+        tl.addStretch()
+        for glyph, handler in (("−", self.showMinimized), ("□", self._toggle_maximize), ("×", self.close)):
+            b = QPushButton(glyph)
+            b.setFixedSize(42, 35)
+            b.setStyleSheet("QPushButton { color:white; background:#0a0a0a; border:0; border-radius:0; font-size:17px; }"
+                            "QPushButton:hover { background:#333333; }")
+            b.clicked.connect(handler)
+            tl.addWidget(b)
+        root.addWidget(title)
 
-        titles = QVBoxLayout()
-        titles.setSpacing(1)
-        titles.setContentsMargins(0,8,0,8)
-        lbl_title = QLabel(APP_NAME)
-        lbl_title.setStyleSheet(f"color:{TEXT}; font-size:16px; font-weight:800;")
-        lbl_sub = QLabel("의료기기 허가정보 수집 · 병합  ·  emedi.mfds.go.kr")
-        lbl_sub.setStyleSheet(f"color:{MUTED}; font-size:11px;")
-        titles.addWidget(lbl_title)
-        titles.addWidget(lbl_sub)
-
+        # 헤더의 탭은 실제 페이지와 동기화된다.
+        nav = QFrame()
+        nav.setFixedHeight(64)
+        nav.setStyleSheet("background:white;")
+        nl = QHBoxLayout(nav)
+        nl.setContentsMargins(0, 0, 0, 0)
+        nl.setSpacing(0)
+        brand = QWidget()
+        brand.setFixedWidth(276)
+        brand.setStyleSheet(f"border-right:1px solid {TEXT}; border-bottom:0;")
+        brand_row = QHBoxLayout(brand)
+        brand_row.setContentsMargins(28, 0, 14, 0)
+        brand_row.setSpacing(9)
+        logo = QLabel("eMedi")
+        logo.setStyleSheet(f"font-family:{SANS}; font-weight:700; font-size:20px; border:0;")
+        site = QLabel("emedi.mfds.go.kr")
+        site.setStyleSheet(f"font-family:{MONO}; font-size:11px; color:{MUTED}; border:0;")
+        brand_row.addWidget(logo)
+        brand_row.addWidget(site)
+        nl.addWidget(brand)
+        self.tab_crawl = self._nav_button("01  크롤링", 0)
+        self.tab_merge = self._nav_button("02  허가사항 병합", 1)
+        nl.addWidget(self.tab_crawl)
+        nl.addWidget(self.tab_merge)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        nl.addWidget(spacer)
         self.lbl_chrome = QLabel()
-        self.lbl_chrome.setFixedHeight(28)
+        self.lbl_chrome.setFixedWidth(208)
+        self.lbl_chrome.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        nl.addWidget(self.lbl_chrome)
+        root.addWidget(nav)
+        root.addWidget(self._rule(2))
         self._set_chrome_state(False)
+        self.tabs = QStackedWidget()
+        self.tabs.currentChanged.connect(self._tab_changed)
 
-        hl.addWidget(AppLogo())
-        hl.addLayout(titles)
-        hl.addStretch()
-        hl.addWidget(self.lbl_chrome, 0, Qt.AlignmentFlag.AlignVCenter)
-        root.addWidget(hdr)
+        stats = QFrame()
+        stats.setFixedHeight(108)
+        stats.setStyleSheet("background:white;")
+        sl = QHBoxLayout(stats)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(0)
+        self.tile_total = self._tile("진행", "0/0", TEXT)
+        self.tile_done = self._tile("완료", "0", TEXT)
+        self.tile_fail = self._tile("실패 · 재시도 2회", "0", DANGER)
+        self.tile_eta = self._tile("남은 시간", "—", TEXT)
+        for tile in (self.tile_total, self.tile_done, self.tile_fail, self.tile_eta):
+            sl.addWidget(tile, 1)
+        self.tile_pending = self.tile_total.pending
+        root.addWidget(stats)
+        root.addWidget(self._rule(1))
 
-        # ── 탭 (알약 모양) ────────────────────────────────
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
-        self.tabs.setStyleSheet(f"""
-            QTabWidget::pane {{ border:none; background:{BG}; }}
-            QTabWidget::tab-bar {{ left:24px; }}
-            QTabBar {{ background:transparent; }}
-            QTabBar::tab {{
-                background:transparent; color:{MUTED};
-                font-size:12px; font-weight:700;
-                padding:9px 20px; margin:16px 6px 0 0;
-                border:none; border-radius:16px;
-            }}
-            QTabBar::tab:selected {{ background:{SOFT}; color:{PRIMARY}; }}
-            QTabBar::tab:hover:!selected {{ color:{TEXT}; background:#ECEEF3; }}
-        """)
-        self.tabs.addTab(self._build_tab1(), "①  크롤링")
-        self.tabs.addTab(self._build_tab2(), "②  허가사항 병합")
-        # 위(탭)는 스크롤 가능, 아래(진행 + 로그)와의 경계는 끌어서 조절 가능
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet(f"QScrollArea {{ background:{BG}; border:none; }}")
-        scroll.setWidget(self.tabs)
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.setHandleWidth(6)
-        splitter.setStyleSheet(f"QSplitter::handle {{ background:{BORDER}; }} QSplitter::handle:hover {{ background:{PRIMARY}; }}")
-        splitter.addWidget(scroll)
-
-        # ── 하단 공통: 진행 상황 + 로그 ─────────────────────
-        bottom = QFrame()
-        bottom.setObjectName("bottom")
-        bottom.setStyleSheet(f"#bottom {{ background:{CARD}; border-top:1px solid {BORDER}; }}")
-        bl = QVBoxLayout(bottom)
-        bl.setContentsMargins(28,14,28,12)
-        bl.setSpacing(8)
-
-        row_prog = QHBoxLayout()
+        progress_row = QFrame()
+        progress_row.setFixedHeight(52)
+        progress_row.setStyleSheet("background:white;")
+        pl = QHBoxLayout(progress_row)
+        pl.setContentsMargins(28, 0, 28, 0)
+        pl.setSpacing(18)
         self.lbl_status = QLabel("대기 중")
-        self.lbl_status.setStyleSheet(f"color:{TEXT}; font-size:11px; font-weight:600;")
-        self.lbl_pct = QLabel("0%")
-        self.lbl_pct.setStyleSheet(f"color:{PRIMARY}; font-size:11px; font-weight:800;")
-        row_prog.addWidget(self.lbl_status)
-        row_prog.addStretch()
-        row_prog.addWidget(self.lbl_pct)
-        bl.addLayout(row_prog)
-
+        self.lbl_status.setMinimumWidth(165)
+        self.lbl_status.setStyleSheet(f"font-family:{MONO}; font-size:13px; border:0;")
         self.progress = QProgressBar()
-        self.progress.setFixedHeight(8)
+        self.progress.setFixedHeight(14)
         self.progress.setTextVisible(False)
-        self.progress.setStyleSheet(f"""
-            QProgressBar {{ background:#EEF0F4; border-radius:4px; border:none; }}
-            QProgressBar::chunk {{ border-radius:4px;
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {PRIMARY}, stop:1 {ACCENT}); }}
-        """)
-        bl.addWidget(self.progress)
+        self.progress.setStyleSheet(f"QProgressBar {{ border:1px solid {TEXT}; background:white; border-radius:0; }}"
+                                    f"QProgressBar::chunk {{ background:{PRIMARY}; border-radius:0; }}")
+        self.lbl_pct = QLabel("0%")
+        self.lbl_pct.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.lbl_pct.setFixedWidth(45)
+        self.lbl_pct.setStyleSheet(f"font-family:{MONO}; font-size:13px; font-weight:600; border:0;")
+        pl.addWidget(self.lbl_status)
+        pl.addWidget(self.progress, 1)
+        pl.addWidget(self.lbl_pct)
+        root.addWidget(progress_row)
+        root.addWidget(self._rule(2))
 
-        log_hdr = QHBoxLayout()
-        lbl_log = QLabel("LOG")
-        lbl_log.setStyleSheet(f"color:{MUTED}; font-size:10px; font-weight:800; letter-spacing:1px;")
-        log_hdr.addWidget(lbl_log)
-        log_hdr.addStretch()
-        log_hdr.addWidget(self._link_btn("지우기", lambda: self.log_box.clear()))
-        bl.addLayout(log_hdr)
+        self.tabs.addWidget(self._build_tab1())
+        self.tabs.addWidget(self._build_tab2())
+        self.tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        root.addWidget(self.tabs)
+        self._tab_changed(0)
+
+        # 요약 테이블은 가용 높이를 전부 사용한다. 상세 진단 로그만 선택적으로 펼친다.
+        self.log_table = QTableWidget(0, 4)
+        self.log_table.setHorizontalHeaderLabels(["#", "허가번호", "항목", "상태"])
+        self.log_table.setShowGrid(False)
+        self.log_table.setAlternatingRowColors(False)
+        self.log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.log_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.log_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.log_table.setItemDelegate(RuledRowDelegate(self.log_table))
+        self.log_table.verticalHeader().hide()
+        self.log_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.log_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.log_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.log_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.log_table.setColumnWidth(0, 96)
+        self.log_table.setColumnWidth(2, 120)
+        self.log_table.setColumnWidth(3, 120)
+        self.log_table.horizontalHeader().setFixedHeight(34)
+        self.log_table.setStyleSheet(f"""
+            QTableWidget {{ background:white; border:0; color:{TEXT}; font-family:{MONO}; font-size:13px; }}
+            QHeaderView::section {{ background:white; color:{MUTED}; border:0; border-bottom:1px solid {TEXT};
+                padding-left:28px; font-family:{MONO}; font-size:11px; letter-spacing:1px; text-align:left; }}
+        """)
+        root.addWidget(self.log_table, 1)
 
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
-        self.log_box.setMinimumHeight(120)
-        self.log_box.setStyleSheet(f"""
-            QTextEdit {{
-                background:{DARK_LOG}; color:#E2E8F0;
-                font-family:Consolas,Menlo,"맑은 고딕",monospace; font-size:12px;
-                border-radius:10px; border:none; padding:10px;
-            }}
-            QScrollBar:vertical {{ background:transparent; width:8px; margin:4px 2px; }}
-            QScrollBar::handle:vertical {{ background:#334155; border-radius:3px; min-height:24px; }}
-            QScrollBar::add-line, QScrollBar::sub-line {{ height:0; }}
-            QScrollBar::add-page, QScrollBar::sub-page {{ background:transparent; }}
-        """)
-        bl.addWidget(self.log_box)
+        self.log_box.document().setMaximumBlockCount(250)
+        self.log_box.setFixedHeight(170)
+        self.log_box.setVisible(False)
+        self.log_box.setStyleSheet(f"QTextEdit {{ background:white; color:{TEXT}; border:0; border-top:2px solid {TEXT};"
+                                   f"font-family:{MONO}; font-size:12px; padding:8px 28px; border-radius:0; }}")
+        root.addWidget(self.log_box)
 
-        credit = QLabel(f"Dev. Yuri Kim  ·  {APP_DATE}")
-        credit.setAlignment(Qt.AlignmentFlag.AlignRight)
-        credit.setStyleSheet(f"color:{MUTED}; font-size:9px;")
-        bl.addWidget(credit)
+        footer = QFrame()
+        footer.setFixedHeight(40)
+        footer.setStyleSheet(f"background:white; border-top:2px solid {TEXT};")
+        fl = QHBoxLayout(footer)
+        fl.setContentsMargins(28, 0, 28, 0)
+        fl.setSpacing(20)
+        fl.addWidget(self._link_btn("로그 지우기", self._clear_log))
+        self.lbl_log_summary = QLabel("현재 작업만 표시됩니다")
+        self.lbl_log_summary.setStyleSheet(f"color:{MUTED}; font-family:{MONO}; font-size:11px; border:0;")
+        fl.addWidget(self.lbl_log_summary, 1)
+        self.btn_log_toggle = self._link_btn("상세 로그 펼치기", self._toggle_log)
+        self.btn_log_toggle.setCheckable(True)
+        fl.addWidget(self.btn_log_toggle)
+        credit = QLabel(f"DEV. YURI KIM · {APP_DATE}")
+        credit.setStyleSheet(f"color:{MUTED}; font-family:{MONO}; font-size:11px; border:0;")
+        fl.addWidget(credit)
+        root.addWidget(footer)
 
-        splitter.addWidget(bottom)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-        splitter.setCollapsible(0, False)
-        splitter.setCollapsible(1, False)
-        self.splitter = splitter
-        root.addWidget(splitter, 1)
+    def _nav_button(self, label, index):
+        b = QPushButton(label)
+        b.setFixedWidth(184 if index else 132)
+        b.setFixedHeight(62)
+        b.clicked.connect(lambda: self.tabs.setCurrentIndex(index))
+        return b
 
-    def showEvent(self, e):
-        super().showEvent(e)
-        if not getattr(self, "_sized", False):
-            # 처음 열 때: 위쪽엔 필요한 만큼(최대 62%), 나머지는 로그
-            self._sized = True
-            total = self.splitter.height()
-            top = min(self.tabs.sizeHint().height() + 8, int(total * 0.62))
-            self.splitter.setSizes([top, max(total - top, 180)])
+    def _tab_changed(self, index):
+        self.tabs.setFixedHeight(165 if index == 0 else 250)
+        for i, b in enumerate((self.tab_crawl, self.tab_merge)):
+            color, bg = ("white", PRIMARY) if i == index else (TEXT, "white")
+            b.setStyleSheet(f"QPushButton {{ background:{bg}; color:{color}; border:0; border-right:1px solid {TEXT};"
+                            f"border-radius:0; font-family:{MONO}; font-size:12px; font-weight:600; }}"
+                            f"QPushButton:hover {{ background:{PRIMARY if i == index else '#f2f2f2'}; }}")
+
+    def _toggle_maximize(self):
+        self.showNormal() if self.isMaximized() else self.showMaximized()
+
+    def _rule(self, thickness):
+        line = QFrame()
+        line.setFixedHeight(thickness)
+        line.setStyleSheet(f"background:{TEXT}; border:0;")
+        return line
+
+    def eventFilter(self, obj, event):
+        if (event.type() == QEvent.Type.MouseButtonPress and
+                event.button() == Qt.MouseButton.LeftButton and
+                isinstance(obj, QWidget) and obj.window() is self and not self.isMaximized()):
+            pos = self.mapFromGlobal(event.globalPosition().toPoint())
+            edge = Qt.Edge(0)
+            if pos.x() < 6: edge |= Qt.Edge.LeftEdge
+            elif pos.x() >= self.width() - 6: edge |= Qt.Edge.RightEdge
+            if pos.y() < 6: edge |= Qt.Edge.TopEdge
+            elif pos.y() >= self.height() - 6: edge |= Qt.Edge.BottomEdge
+            if edge and self.windowHandle() and self.windowHandle().startSystemResize(edge):
+                return True
+        return super().eventFilter(obj, event)
 
     # ── 탭 1: 크롤링 ──────────────────────────────────────
     def _build_tab1(self):
         w = QWidget()
         layout = QVBoxLayout(w)
-        layout.setContentsMargins(24,12,24,12)
-        layout.setSpacing(12)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        card2, c2 = self._card("↓", "크롤링",
-            "① 크롬 열기 → 사이트에서 검색 → ② 크롤링 시작.  "
-            f"실패한 항목은 최대 {MAX_RETRY}회 재시도하고, 중단해도 모은 데이터는 저장됩니다.")
-        self.btn_open = self._btn("① 크롬 열기", PRIMARY, self._open_site)
-        self.crawl_output, self.crawl_name = self._save_fields(c2, default_crawl_name())
+        controls = QFrame()
+        controls.setFixedHeight(56)
+        controls.setStyleSheet("background:white;")
+        row = QHBoxLayout(controls)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        self.btn_open = self._btn("① 크롬 열기", CARD, self._open_site)
+        self.btn_crawl = self._btn("② 크롤링 시작", PRIMARY, self._start_crawl)
+        self.btn_crawl.setEnabled(False)
+        self.btn_stop = self._btn("■  중단", DANGER, self._stop_crawl)
+        self.btn_stop.setEnabled(False)
+        for b, width in ((self.btn_open, 150), (self.btn_crawl, 165), (self.btn_stop, 125)):
+            b.setFixedWidth(width)
+            row.addWidget(b)
 
         self.chk_fast = QCheckBox("빠른 모드 (실험적)")
         self.chk_fast.setChecked(False)
         self.chk_fast.setToolTip("꺼짐 (기본): 원래 방식. 항목마다 상세 화면을 열고 10초 기다린 뒤 읽음\n"
                                  "켜짐: 상세 화면이 뜨면 바로 읽음. 실패하면 그 항목은 원래 방식으로 다시 시도")
-        self.chk_fast.setStyleSheet(f"QCheckBox {{ color:{TEXT}; font-size:11px; font-weight:600; spacing:8px; }}")
-        fast_hint = QLabel("기본은 원래 방식 (항목당 약 11초)")
-        fast_hint.setStyleSheet(f"color:{MUTED}; font-size:10px;")
-        row_fast = QHBoxLayout()
-        row_fast.addWidget(self.chk_fast)
-        row_fast.addWidget(fast_hint)
-        row_fast.addStretch()
-        c2.addLayout(row_fast)
-
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-        self.btn_crawl = self._btn("② 크롤링 시작", SUCCESS, self._start_crawl)
-        self.btn_crawl.setEnabled(False)
-        self.btn_stop = self._btn("■  중단", DANGER, self._stop_crawl)
-        self.btn_stop.setEnabled(False)
-        self.btn_crawl_open = self._ghost_btn("파일 열기", lambda: self._open_path(self._last_crawl_file))
-        self.btn_crawl_dir  = self._ghost_btn("폴더 열기",
+        self.chk_fast.setStyleSheet(f"QCheckBox {{ color:{TEXT}; font-family:{SANS}; font-size:12px; spacing:8px; border:0; }}"
+                                    f"QCheckBox::indicator {{ width:15px; height:15px; border:1px solid {TEXT}; border-radius:0; background:white; }}"
+                                    f"QCheckBox::indicator:checked {{ background:{PRIMARY}; }}")
+        fast = QWidget()
+        fast.setStyleSheet(f"border-left:1px solid {TEXT}; border-bottom:0;")
+        fast_row = QHBoxLayout(fast)
+        fast_row.setContentsMargins(22, 0, 8, 0)
+        fast_row.setSpacing(12)
+        fast_row.addWidget(self.chk_fast)
+        fast_hint = QLabel("기본 약 11초/항목")
+        fast_hint.setStyleSheet(f"color:{MUTED}; font-family:{MONO}; font-size:11px; border:0;")
+        fast_row.addWidget(fast_hint)
+        fast_row.addStretch()
+        row.addWidget(fast, 1)
+        self.btn_crawl_open = self._ghost_btn("파일 열기 ↗", lambda: self._open_path(self._last_crawl_file))
+        self.btn_crawl_dir = self._ghost_btn("폴더 열기 ↗",
             lambda: self._open_path(Path(self._last_crawl_file).parent if self._last_crawl_file else None))
-        btn_row.addWidget(self.btn_open, 3)
-        btn_row.addWidget(self.btn_crawl, 3)
-        btn_row.addWidget(self.btn_stop, 2)
-        btn_row.addWidget(self.btn_crawl_open, 2)
-        btn_row.addWidget(self.btn_crawl_dir, 2)
-        c2.addLayout(btn_row)
+        for b in (self.btn_crawl_open, self.btn_crawl_dir):
+            b.setFixedWidth(118)
+            row.addWidget(b)
+        layout.addWidget(controls)
+        layout.addWidget(self._rule(1))
+
+        output = QFrame()
+        output.setFixedHeight(56)
+        output.setStyleSheet("background:white;")
+        output_row = QHBoxLayout(output)
+        output_row.setContentsMargins(0, 0, 0, 0)
+        output_row.setSpacing(0)
+        self.crawl_output, self.crawl_name = self._save_fields(output_row, default_crawl_name())
+        layout.addWidget(output)
+        layout.addWidget(self._rule(2))
+
+        repair = QFrame()
+        repair.setFixedHeight(48)
+        repair.setStyleSheet("background:white;")
+        repair_row = QHBoxLayout(repair)
+        repair_row.setContentsMargins(28, 0, 0, 0)
+        repair_row.setSpacing(0)
+        repair_row.addWidget(self._field_label("기존 결과"))
+        self.recovery_file = DropLineEdit()
+        self.recovery_file.setPlaceholderText("기존 결과 .json / .xlsx (중간 저장 파일도 가능)")
+        self._style_input(self.recovery_file)
+        repair_row.addWidget(self.recovery_file, 1)
+        repair_row.addWidget(self._small_btn("기존 결과 선택", self._pick_recovery))
+        self.btn_repair = self._ghost_btn("누락분만 수집", lambda: self._start_crawl(repair=True))
+        self.btn_repair.setEnabled(False)
+        repair_row.addWidget(self.btn_repair)
+        layout.addWidget(repair)
+        layout.addWidget(self._rule(2))
         self._set_result_buttons("crawl", None)
-
-        tiles = QHBoxLayout()
-        tiles.setSpacing(8)
-        self.tile_total = self._tile("전체", "—", TEXT)
-        self.tile_done  = self._tile("완료", "—", SUCCESS)
-        self.tile_fail  = self._tile("실패", "—", DANGER)
-        self.tile_eta   = self._tile("남은 시간", "—", PRIMARY)
-        for t in (self.tile_total, self.tile_done, self.tile_fail, self.tile_eta):
-            tiles.addWidget(t)
-        c2.addLayout(tiles)
-        layout.addWidget(card2)
-
-        layout.addStretch()
         return w
 
     # ── 탭 2: 허가사항 병합 ───────────────────────────────
     def _build_tab2(self):
         w = QWidget()
         layout = QVBoxLayout(w)
-        layout.setContentsMargins(24,16,24,16)
-        layout.setSpacing(14)
-
-        card, c = self._card("+", "크롤링 결과에 전자민원 허가사항 붙이기",
-            "파일을 끌어다 놓거나 '선택'을 누르세요. 크롤링이 끝나면 파일 1은 자동으로 채워집니다.")
-
-        c.addWidget(self._field_label("파일 1  ·  크롤링 결과 엑셀"))
-        row1 = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        heading = QLabel("크롤링 결과에 전자민원 허가사항 붙이기  /  파일을 끌어다 놓거나 선택하세요")
+        heading.setFixedHeight(40)
+        heading.setStyleSheet(f"padding-left:28px; font-family:{MONO}; font-size:12px;")
+        layout.addWidget(heading)
+        layout.addWidget(self._rule(1))
+        row1 = self._merge_field("파일 1 · 크롤링 결과 엑셀")
         self.merge_crawl = DropLineEdit()
         self.merge_crawl.setPlaceholderText("여기에 파일을 끌어다 놓기")
         self._style_input(self.merge_crawl)
         row1.addWidget(self.merge_crawl)
         row1.addWidget(self._small_btn("선택", lambda: self._pick_file(self.merge_crawl)))
-        c.addLayout(row1)
+        layout.addLayout(row1)
 
-        c.addWidget(self._field_label("파일 2  ·  품목 허가(신고)사항  (전자민원 → 나의민원 → 엑셀 다운로드)"))
-        row2 = QHBoxLayout()
+        row2 = self._merge_field("파일 2 · 품목 허가(신고)사항  (전자민원 → 나의민원 → 엑셀 다운로드)")
         self.merge_permit = DropLineEdit()
         self.merge_permit.setPlaceholderText("품목+허가(신고)사항.xlsx")
         self._style_input(self.merge_permit)
         row2.addWidget(self.merge_permit)
         row2.addWidget(self._small_btn("선택", lambda: self._pick_file(self.merge_permit)))
-        c.addLayout(row2)
+        layout.addLayout(row2)
 
-        self.merge_output, self.merge_name = self._save_fields(c, default_merge_name())
+        output = QFrame()
+        output.setFixedHeight(56)
+        output.setStyleSheet("background:white;")
+        ol = QHBoxLayout(output)
+        ol.setContentsMargins(0, 0, 0, 0)
+        ol.setSpacing(0)
+        self.merge_output, self.merge_name = self._save_fields(ol, default_merge_name())
+        layout.addWidget(output)
+        layout.addWidget(self._rule(1))
 
-        c.addSpacing(4)
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-        self.btn_merge = self._btn("파일 병합 시작", PRIMARY_2, self._start_merge)
-        self.btn_merge_open = self._ghost_btn("파일 열기", lambda: self._open_path(self._last_merge_file))
-        self.btn_merge_dir  = self._ghost_btn("폴더 열기",
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(0)
+        self.btn_merge = self._btn("파일 병합 시작", PRIMARY, self._start_merge)
+        self.btn_merge_open = self._ghost_btn("파일 열기 ↗", lambda: self._open_path(self._last_merge_file))
+        self.btn_merge_dir  = self._ghost_btn("폴더 열기 ↗",
             lambda: self._open_path(Path(self._last_merge_file).parent if self._last_merge_file else None))
-        btn_row.addWidget(self.btn_merge, 5)
-        btn_row.addWidget(self.btn_merge_open, 2)
-        btn_row.addWidget(self.btn_merge_dir, 2)
-        c.addLayout(btn_row)
+        btn_row.addWidget(self.btn_merge, 3)
+        btn_row.addWidget(self.btn_merge_open, 1)
+        btn_row.addWidget(self.btn_merge_dir, 1)
+        layout.addLayout(btn_row)
         self._set_result_buttons("merge", None)
-        layout.addWidget(card)
-
-        layout.addStretch()
         return w
+
+    def _merge_field(self, text):
+        row = QHBoxLayout()
+        row.setContentsMargins(28, 0, 0, 0)
+        row.setSpacing(0)
+        label = self._field_label(text)
+        label.setMinimumWidth(460)
+        row.addWidget(label)
+        return row
 
     # ── UI 헬퍼 ───────────────────────────────────────────
     def _save_fields(self, layout, default_name):
         """저장 폴더 + 파일 이름 입력칸"""
-        grid = QHBoxLayout()
-        grid.setSpacing(10)
-
-        col_dir = QVBoxLayout()
-        col_dir.setSpacing(6)
-        col_dir.addWidget(self._field_label("저장 폴더"))
-        row_dir = QHBoxLayout()
+        left = QWidget()
+        left.setStyleSheet(f"border-right:1px solid {TEXT};")
+        row_dir = QHBoxLayout(left)
+        row_dir.setContentsMargins(28, 0, 0, 0)
+        row_dir.setSpacing(0)
+        row_dir.addWidget(self._field_label("저장 폴더"))
         out = DropLineEdit(str(default_output_dir()))
         self._style_input(out)
-        row_dir.addWidget(out)
+        row_dir.addWidget(out, 1)
         row_dir.addWidget(self._small_btn("변경", lambda: self._pick_dir(out)))
-        col_dir.addLayout(row_dir)
 
-        col_name = QVBoxLayout()
-        col_name.setSpacing(6)
-        col_name.addWidget(self._field_label("파일 이름"))
-        row_name = QHBoxLayout()
-        row_name.setSpacing(6)
+        right = QWidget()
+        row_name = QHBoxLayout(right)
+        row_name.setContentsMargins(16, 0, 28, 0)
+        row_name.setSpacing(8)
+        row_name.addWidget(self._field_label("파일명"))
         name = QLineEdit(default_name)
         name.setPlaceholderText(default_name)
         name.setToolTip("같은 이름의 파일이 있으면 _2, _3 … 이 붙어 저장됩니다.")
         self._style_input(name)
         ext = QLabel(".xlsx")
-        ext.setStyleSheet(f"color:{MUTED}; font-size:11px; font-weight:600;")
-        row_name.addWidget(name)
+        ext.setStyleSheet(f"color:{MUTED}; font-family:{MONO}; font-size:11px;")
+        row_name.addWidget(name, 1)
         row_name.addWidget(ext)
-        col_name.addLayout(row_name)
-
-        grid.addLayout(col_dir, 3)
-        grid.addLayout(col_name, 2)
-        layout.addLayout(grid)
+        layout.addWidget(left, 3)
+        layout.addWidget(right, 2)
         return out, name
-
-    def _card(self, badge_text, title, desc):
-        card = QFrame()
-        card.setObjectName("card")
-        card.setStyleSheet(f"#card {{ background:{CARD}; border:1px solid {BORDER}; border-radius:14px; }}")
-        v = QVBoxLayout(card)
-        v.setContentsMargins(20,14,20,16)
-        v.setSpacing(8)
-
-        row = QHBoxLayout()
-        badge = QLabel(badge_text)
-        badge.setFixedSize(28, 28)
-        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        badge.setStyleSheet(f"background:{SOFT}; color:{PRIMARY}; font-size:13px; font-weight:800; border-radius:8px;")
-        lbl = QLabel(title)
-        lbl.setStyleSheet(f"color:{TEXT}; font-size:14px; font-weight:800;")
-        row.addWidget(badge)
-        row.addSpacing(6)
-        row.addWidget(lbl)
-        row.addStretch()
-        v.addLayout(row)
-
-        d = QLabel(desc)
-        d.setStyleSheet(f"color:{MUTED}; font-size:11px;")
-        d.setWordWrap(True)
-        v.addWidget(d)
-        return card, v
 
     def _field_label(self, text):
         l = QLabel(text)
-        l.setStyleSheet(f"color:{TEXT}; font-size:10px; font-weight:700; padding-top:4px;")
+        l.setStyleSheet(f"color:{MUTED}; font-family:{MONO}; font-size:11px; letter-spacing:1px; border:0;")
+        l.setContentsMargins(0, 0, 16, 0)
         return l
 
     def _tile(self, label, value, color):
         t = QFrame()
-        t.setObjectName("tile")
-        t.setStyleSheet(f"#tile {{ background:{BG}; border:1px solid {BORDER}; border-radius:10px; }}")
+        t.setStyleSheet(f"background:white; border-right:1px solid {TEXT};")
         v = QVBoxLayout(t)
-        v.setContentsMargins(12,6,12,6)
-        v.setSpacing(0)
+        v.setContentsMargins(28, 12, 20, 6)
+        v.setSpacing(2)
         cap = QLabel(label)
-        cap.setStyleSheet(f"color:{MUTED}; font-size:10px; font-weight:700;")
+        cap.setStyleSheet(f"color:{MUTED}; font-family:{MONO}; font-size:11px; letter-spacing:1px; border:0;")
         val = QLabel(value)
-        val.setStyleSheet(f"color:{color}; font-size:17px; font-weight:800;")
+        val.setStyleSheet(f"color:{color}; font-family:{MONO}; font-size:44px; font-weight:500; border:0;")
         v.addWidget(cap)
         v.addWidget(val)
         t.value = val
+        if label == "진행":
+            t.pending = QLabel("대기 0")
+            t.pending.setStyleSheet(f"color:{MUTED}; font-family:{MONO}; font-size:10px; border:0;")
+            v.addWidget(t.pending)
         return t
 
     def _btn(self, text, color, slot):
         b = QPushButton(text)
-        b.setFixedHeight(38)
+        b.setFixedHeight(56)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
+        fg = "white" if color != CARD else TEXT
+        hover = self._dk(color) if color != CARD else "#f2f2f2"
         b.setStyleSheet(f"""
             QPushButton {{
-                background:{color}; color:white;
-                font-size:12px; font-weight:700;
-                border-radius:10px; border:none; padding:0 18px;
+                background:{color}; color:{fg};
+                font-family:{SANS}; font-size:13px; font-weight:700;
+                border-radius:0; border:0; border-right:1px solid {TEXT};
             }}
-            QPushButton:hover {{ background:{self._dk(color)}; }}
-            QPushButton:pressed {{ background:{self._dk(self._dk(color))}; }}
-            QPushButton:disabled {{ background:#EEF0F4; color:#A1A7B3; }}
+            QPushButton:hover {{ background:{hover}; }}
+            QPushButton:disabled {{ background:{color}; color:{FAINT}; }}
         """)
         b.clicked.connect(slot)
         return b
 
     def _ghost_btn(self, text, slot):
         b = QPushButton(text)
-        b.setFixedHeight(38)
+        b.setFixedHeight(56)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         b.setStyleSheet(f"""
             QPushButton {{
-                background:{CARD}; color:{TEXT};
-                font-size:12px; font-weight:700;
-                border-radius:10px; border:1px solid {BORDER}; padding:0 14px;
+                background:white; color:{TEXT}; font-family:{SANS};
+                font-size:12px; font-weight:500;
+                border-radius:0; border:0; border-left:1px solid {TEXT}; padding:0 14px;
             }}
-            QPushButton:hover {{ border-color:{PRIMARY}; color:{PRIMARY}; background:{SOFT}; }}
-            QPushButton:disabled {{ color:#C0C4CC; background:{CARD}; border-color:#EEF0F4; }}
+            QPushButton:hover {{ background:#f2f2f2; }}
+            QPushButton:disabled {{ color:{FAINT}; }}
         """)
         b.clicked.connect(slot)
         return b
 
     def _small_btn(self, text, slot):
         b = QPushButton(text)
-        b.setFixedHeight(36)
+        b.setFixedHeight(48)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         b.setStyleSheet(f"""
             QPushButton {{
-                background:{SOFT}; color:{PRIMARY};
-                font-size:11px; font-weight:700;
-                border-radius:8px; border:none; padding:0 14px;
+                background:white; color:{PRIMARY}; font-family:{SANS};
+                font-size:12px; font-weight:700;
+                border-radius:0; border:0; border-left:1px solid {TEXT}; padding:0 16px;
             }}
-            QPushButton:hover {{ background:#E0E7FF; }}
+            QPushButton:hover {{ background:#f2f2f2; }}
         """)
         b.clicked.connect(slot)
         return b
@@ -1204,32 +1339,29 @@ class MainWindow(QMainWindow):
         b = QPushButton(text)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         b.setStyleSheet(f"""
-            QPushButton {{ background:transparent; color:{MUTED}; border:none; font-size:10px; }}
-            QPushButton:hover {{ color:{PRIMARY}; text-decoration:underline; }}
+            QPushButton {{ background:white; color:{TEXT}; border:0; border-radius:0;
+                font-family:{MONO}; font-size:11px; }}
+            QPushButton:hover {{ color:{PRIMARY}; }}
         """)
         b.clicked.connect(slot)
         return b
 
     def _style_input(self, edit):
-        edit.setFixedHeight(36)
+        edit.setFixedHeight(44)
         edit.setStyleSheet(f"""
             QLineEdit {{
-                background:{CARD}; border:1px solid {BORDER};
-                border-radius:8px; padding:0 10px;
-                font-size:11px; color:{TEXT};
+                background:white; border:0; border-radius:0; padding:0 12px;
+                font-family:{MONO}; font-size:12px; color:{TEXT};
             }}
-            QLineEdit:focus {{ border:1.5px solid {PRIMARY}; }}
+            QLineEdit:focus {{ border-bottom:2px solid {PRIMARY}; }}
         """)
 
     def _set_chrome_state(self, connected):
-        if connected:
-            fg, bg, text = "#047857", "#D1FAE5", "크롬 연결됨"
-        else:
-            fg, bg, text = MUTED, "#F1F2F6", "크롬 대기"
-        self.lbl_chrome.setText(f"●  {text}")
+        dot, text = ("#00b35c", "CHROME · CONNECTED") if connected else (FAINT, "CHROME · DISCONNECTED")
+        self.lbl_chrome.setText(f"<span style='color:{dot};'>■</span> &nbsp; {text}")
         self.lbl_chrome.setStyleSheet(f"""
-            color:{fg}; background:{bg}; font-size:11px; font-weight:700;
-            border-radius:14px; padding:0 14px;
+            color:{MUTED}; background:white; border-left:1px solid {TEXT}; border-bottom:0;
+            font-family:{MONO}; font-size:11px;
         """)
 
     def _set_result_buttons(self, which, path):
@@ -1251,9 +1383,10 @@ class MainWindow(QMainWindow):
             self._log(f"파일을 찾을 수 없습니다: {path}", "err")
 
     def _set_stats(self, total, done, failed, eta):
-        self.tile_total.value.setText(f"{total:,}")
+        self.tile_total.value.setText(f"{done+failed:,}<span style='color:{FAINT};'>/{total:,}</span>")
         self.tile_done.value.setText(f"{done:,}")
-        self.tile_fail.value.setText(f"{failed:,}")
+        self.tile_fail.value.setText(f"{failed:03d}")
+        self.tile_pending.setText(f"대기 {max(0, total-done-failed):,}")
         self.tile_eta.value.setText(eta)
 
     def _dk(self, h):
@@ -1264,6 +1397,12 @@ class MainWindow(QMainWindow):
     def _pick_file(self, edit):
         p,_ = QFileDialog.getOpenFileName(self,"파일 선택",str(default_output_dir()),"Excel (*.xlsx *.xls)")
         if p: edit.setText(p)
+
+    def _pick_recovery(self):
+        start = self.recovery_file.text() or self.crawl_output.text() or str(default_output_dir())
+        p,_ = QFileDialog.getOpenFileName(self, "기존 크롤링 결과 선택", start,
+                                         "크롤링 결과 (*.json *.xlsx)")
+        if p: self.recovery_file.setText(p)
 
     def _pick_dir(self, edit):
         p = QFileDialog.getExistingDirectory(self,"폴더 선택",edit.text() or str(Path.home()))
@@ -1296,6 +1435,8 @@ class MainWindow(QMainWindow):
         if self._driver_alive():
             # 이미 열려 있으면 새 크롬을 띄우지 않고 검색 페이지로 이동
             self.driver.get(BASE_URL)
+            try: self.driver.maximize_window()
+            except Exception: pass
             self._log("이미 열린 크롬에서 검색 페이지로 이동했습니다.", "dim")
             return
         self.driver = None
@@ -1319,14 +1460,22 @@ class MainWindow(QMainWindow):
         self._set_chrome_state(True)
         self._log("✓  사이트 열림. 검색 후 크롤링 시작 버튼을 누르세요.", "ok")
         self.btn_crawl.setEnabled(True)
+        self.btn_repair.setEnabled(True)
 
-    def _start_crawl(self):
+    def _start_crawl(self, repair=False):
         if not self._driver_alive():
             self.btn_crawl.setEnabled(False)
+            self.btn_repair.setEnabled(False)
             self._set_chrome_state(False)
             self._log("크롬 창이 닫혀 있습니다. '크롬 열기'를 다시 누르고 검색하세요.", "err"); return
+        existing_file = self.recovery_file.text().strip() if repair else None
+        if repair and not Path(existing_file).is_file():
+            QMessageBox.warning(self, "기존 결과 필요", "중간 저장 JSON 또는 기존 결과 Excel/JSON 파일을 선택하세요.")
+            return
+        self._clear_log()
         self.btn_crawl.setEnabled(False)
-        self.btn_crawl.setText("수집 중...")
+        self.btn_repair.setEnabled(False)
+        self.btn_crawl.setText("누락분 수집 중..." if repair else "수집 중...")
         self.btn_stop.setEnabled(True)
         self.chk_fast.setEnabled(False)
         self._set_progress(0)
@@ -1334,11 +1483,13 @@ class MainWindow(QMainWindow):
         self.tile_total.value.setText("목록…")
 
         worker = CrawlWorker(self.driver, self.crawl_output.text(), self.crawl_name.text(),
-                             fast=self.chk_fast.isChecked())
+                             fast=self.chk_fast.isChecked(), existing_file=existing_file)
         worker.log.connect(self._log)
         worker.status.connect(self.lbl_status.setText)
         worker.progress.connect(self._set_progress)
         worker.stats.connect(self._set_stats)
+        worker.row_event.connect(self._table_event)
+        worker.checkpoint.connect(self._table_checkpoint)
         worker.done.connect(self._crawl_done)
         self.worker = worker
         self._run_in_thread(worker)
@@ -1346,23 +1497,27 @@ class MainWindow(QMainWindow):
     def _stop_crawl(self):
         if self.worker:
             self.worker.abort()
-            self._log("⏹  중단 요청 중... 지금까지 모은 데이터를 저장합니다.", "warn")
+            self._clear_log()
+            self.btn_log_toggle.setChecked(False)
+            self._log("중단 요청 중... 지금까지 모은 데이터를 저장합니다.", "warn")
             self.btn_stop.setEnabled(False)
 
     def _crawl_done(self, ok, msg):
         self.worker = None
-        self.btn_crawl.setEnabled(True)
+        self.btn_crawl.setEnabled(self._driver_alive())
+        self.btn_repair.setEnabled(self._driver_alive())
         self.btn_crawl.setText("② 크롤링 시작")
         self.btn_stop.setEnabled(False)
         self.chk_fast.setEnabled(True)
         saved = msg.splitlines()[-1]
         if saved.endswith(".xlsx"):
             self._set_result_buttons("crawl", saved)
+            self.recovery_file.setText(str(Path(saved).with_suffix(".json")))
         if not self._driver_alive():
             self._set_chrome_state(False)
         if ok:
             self._log(f"\n🎉  크롤링 완료! → {msg}", "ok")
-            self.lbl_status.setText("크롤링 완료 ✓")
+            self.lbl_status.setText("크롤링 완료")
             self.merge_crawl.setText(msg)   # 탭 2에 결과 파일 자동 입력
             self._ask_open("크롤링 완료", msg)
         else:
@@ -1384,6 +1539,7 @@ class MainWindow(QMainWindow):
         for f in (cf, pf):
             if not Path(f).is_file():
                 self._log(f"파일을 찾을 수 없습니다: {f}", "err"); return
+        self._clear_log()
         self.btn_merge.setEnabled(False)
         self.btn_merge.setText("병합 중...")
         self._set_progress(0)
@@ -1421,19 +1577,97 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def _log(self, msg, level=""):
-        colors = {"ok":"#6EE7B7","err":"#FCA5A5","warn":"#FDE68A",
-                  "section":"#C7D2FE","dim":"#CBD5E1","":"#E2E8F0"}
-        c = colors.get(level,"#94A3B8")
+        colors = {"ok":SUCCESS,"err":DANGER,"warn":DANGER,
+                  "section":PRIMARY,"dim":MUTED,"":TEXT}
+        c = colors.get(level, MUTED)
+        msg = msg.replace("🎉", "").replace("❌", "").replace("⏹", "").replace("⚠", "")
+        msg = msg.replace("✓", "OK").replace("★", "-").replace("▶", "-")
         safe = html.escape(msg).replace("\n", "<br>")
         self.log_box.append(
             f'<span style="color:{c};">{safe}</span>')
         self.log_box.verticalScrollBar().setValue(
             self.log_box.verticalScrollBar().maximum())
+        if level != "dim":
+            brief = msg.strip().splitlines()[-1].strip() if msg.strip() else ""
+            if brief:
+                self.lbl_log_summary.setText(brief[:100] + ("…" if len(brief) > 100 else ""))
+                self.lbl_log_summary.setToolTip(brief)
+                if self.tabs.currentIndex() == 1:
+                    self._table_message(brief, level)
         try:
             with open(LOG_FILE, "a", encoding="utf-8") as f:
                 f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {msg}\n")
         except Exception:
             pass
+
+    def _clear_log(self):
+        self.log_box.clear()
+        self.log_table.setRowCount(0)
+        self._active_log_row = None
+        self.lbl_log_summary.setText("현재 작업만 표시됩니다")
+        self.lbl_log_summary.setToolTip("")
+
+    def _toggle_log(self, expanded):
+        self.log_box.setVisible(expanded)
+        self.btn_log_toggle.setText("상세 로그 접기" if expanded else "상세 로그 펼치기")
+
+    def _table_event(self, index, permit, count, status):
+        """화면에는 항목별 결과만, 상세 진단은 접힌 로그에 보관한다."""
+        if status != "RUN" and self._active_log_row is not None:
+            old = self._active_log_row
+            if old < self.log_table.rowCount() and self.log_table.item(old, 1).text() == permit:
+                row = old
+            else:
+                row = self._new_table_row()
+        else:
+            row = self._new_table_row()
+        if status == "RUN":
+            self._active_log_row = row
+        else:
+            self._active_log_row = None
+        for col, value in enumerate((f"{index:03d}", permit, str(count) if count else "—",
+                                      "수집 중…" if status == "RUN" else status)):
+            item = QTableWidgetItem(value)
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter |
+                                  (Qt.AlignmentFlag.AlignRight if col == 3 else Qt.AlignmentFlag.AlignLeft))
+            color = "white" if status == "RUN" else (DANGER if status == "FAIL" and col == 3 else
+                    SUCCESS if status == "OK" and col == 3 else FAINT if col == 0 else TEXT)
+            item.setForeground(QColor(color))
+            item.setBackground(QColor(TEXT if status == "RUN" else "white"))
+            self.log_table.setItem(row, col, item)
+        self.log_table.scrollToBottom()
+
+    def _table_checkpoint(self, complete):
+        row = self._new_table_row()
+        for col, value in enumerate(("—", f"중간 저장 · {complete}건 기록됨", "", "")):
+            item = QTableWidgetItem(value)
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            item.setForeground(QColor(PRIMARY))
+            item.setBackground(QColor("#eef2ff"))
+            self.log_table.setItem(row, col, item)
+        self.log_table.scrollToBottom()
+
+    def _table_message(self, message, level):
+        row = self._new_table_row()
+        marker = "FAIL" if level == "err" else "OK" if level == "ok" else "—"
+        for col, value in enumerate(("—", message, "", marker)):
+            item = QTableWidgetItem(value)
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            item.setForeground(QColor(DANGER if level == "err" else SUCCESS if level == "ok" and col == 3 else TEXT))
+            self.log_table.setItem(row, col, item)
+        self.log_table.setRowHeight(row, 35)
+        self.log_table.scrollToBottom()
+
+    def _new_table_row(self):
+        if self.log_table.rowCount() >= 250:
+            self.log_table.removeRow(0)
+            if self._active_log_row is not None:
+                self._active_log_row -= 1
+        row = self.log_table.rowCount()
+        self.log_table.insertRow(row)
+        self.log_table.setRowHeight(row, 35)
+        return row
 
     def _set_progress(self, v):
         self.progress.setValue(v)
@@ -1442,6 +1676,17 @@ class MainWindow(QMainWindow):
 
 # ═══════════════════════════════════════════════════════════
 LOG_FILE = Path.home() / "emedi_crawler.log"
+
+
+def load_ui_fonts():
+    """설치 여부에 의존하지 않도록 SIL OFL 글꼴을 앱에 등록한다."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "fonts"
+    for name in (
+        "IBMPlexSansKR-Regular.woff", "IBMPlexSansKR-Medium.woff", "IBMPlexSansKR-Bold.woff",
+        "IBMPlexMono-Regular.woff", "IBMPlexMono-Medium.woff", "IBMPlexMono-SemiBold.woff",
+    ):
+        if (base / name).is_file():
+            QFontDatabase.addApplicationFont(str(base / name))
 
 
 def _excepthook(etype, value, tb):
@@ -1461,9 +1706,10 @@ if __name__ == "__main__":
     sys.excepthook = _excepthook
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    app.setFont(QFont("Apple SD Gothic Neo" if platform.system()=="Darwin" else "맑은 고딕", 11))
+    load_ui_fonts()
+    app.setFont(QFont("IBM Plex Sans KR" if QFont("IBM Plex Sans KR").exactMatch() else
+                      ("Apple SD Gothic Neo" if platform.system()=="Darwin" else "맑은 고딕"), 11))
     app.setApplicationName(APP_NAME)
-    app.setWindowIcon(QIcon(AppLogo(128).grab()))
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

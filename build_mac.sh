@@ -1,5 +1,5 @@
 #!/bin/bash
-# emedi 수집기 - macOS 앱 만들기:  터미널에서  bash build_mac.sh
+# emedi 수집기 - macOS 앱 만들기: 터미널에서 bash build_mac.sh
 set -e
 cd "$(dirname "$0")"
 python3 -m venv .venv
@@ -8,6 +8,7 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt pyinstaller
 pyinstaller --noconfirm --clean --windowed --name "emedi_crawler" \
   --collect-data selenium \
+  --add-data "fonts:fonts" \
   --exclude-module tkinter --exclude-module matplotlib \
   app.py
 echo

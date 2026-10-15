@@ -8,6 +8,7 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt pyinstaller || goto :err
 pyinstaller --noconfirm --clean --windowed --name "emedi_crawler" ^
   --collect-data selenium ^
+  --add-data "fonts;fonts" ^
   --exclude-module tkinter --exclude-module matplotlib ^
   app.py || goto :err
 echo.
