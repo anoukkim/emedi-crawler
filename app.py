@@ -877,6 +877,7 @@ class MainWindow(QMainWindow):
         self._last_merge_file = None
         self._drag_offset = None
         self._active_log_row = None
+        self._log_table_mode = "crawl"
         self._build_ui()
         QApplication.instance().installEventFilter(self)
 
@@ -932,7 +933,7 @@ class MainWindow(QMainWindow):
         brand_row.setContentsMargins(28, 0, 14, 0)
         brand_row.setSpacing(9)
         logo = QLabel("eMedi")
-        logo.setStyleSheet(f"font-family:{SANS}; font-weight:700; font-size:20px; border:0;")
+        logo.setStyleSheet(f"color:{TEXT}; font-family:{SANS}; font-weight:700; font-size:20px; border:0;")
         site = QLabel("emedi.mfds.go.kr")
         site.setStyleSheet(f"font-family:{MONO}; font-size:11px; color:{MUTED}; border:0;")
         brand_row.addWidget(logo)
@@ -979,7 +980,7 @@ class MainWindow(QMainWindow):
         pl.setSpacing(18)
         self.lbl_status = QLabel("대기 중")
         self.lbl_status.setMinimumWidth(165)
-        self.lbl_status.setStyleSheet(f"font-family:{MONO}; font-size:13px; border:0;")
+        self.lbl_status.setStyleSheet(f"color:{TEXT}; font-family:{MONO}; font-size:13px; border:0;")
         self.progress = QProgressBar()
         self.progress.setFixedHeight(14)
         self.progress.setTextVisible(False)
@@ -988,7 +989,7 @@ class MainWindow(QMainWindow):
         self.lbl_pct = QLabel("0%")
         self.lbl_pct.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.lbl_pct.setFixedWidth(45)
-        self.lbl_pct.setStyleSheet(f"font-family:{MONO}; font-size:13px; font-weight:600; border:0;")
+        self.lbl_pct.setStyleSheet(f"color:{TEXT}; font-family:{MONO}; font-size:13px; font-weight:600; border:0;")
         pl.addWidget(self.lbl_status)
         pl.addWidget(self.progress, 1)
         pl.addWidget(self.lbl_pct)
@@ -1004,6 +1005,10 @@ class MainWindow(QMainWindow):
         # 요약 테이블은 가용 높이를 전부 사용한다. 상세 진단 로그만 선택적으로 펼친다.
         self.log_table = QTableWidget(0, 4)
         self.log_table.setHorizontalHeaderLabels(["#", "허가번호", "항목", "상태"])
+        for col in range(4):
+            self.log_table.horizontalHeaderItem(col).setTextAlignment(
+                Qt.AlignmentFlag.AlignVCenter |
+                (Qt.AlignmentFlag.AlignRight if col >= 2 else Qt.AlignmentFlag.AlignLeft))
         self.log_table.setShowGrid(False)
         self.log_table.setAlternatingRowColors(False)
         self.log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -1061,7 +1066,7 @@ class MainWindow(QMainWindow):
         return b
 
     def _tab_changed(self, index):
-        self.tabs.setFixedHeight(165 if index == 0 else 250)
+        self.tabs.setFixedHeight(165 if index == 0 else 252)
         for i, b in enumerate((self.tab_crawl, self.tab_merge)):
             color, bg = ("white", PRIMARY) if i == index else (TEXT, "white")
             b.setStyleSheet(f"QPushButton {{ background:{bg}; color:{color}; border:0; border-right:1px solid {TEXT};"
@@ -1178,7 +1183,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(0)
         heading = QLabel("크롤링 결과에 전자민원 허가사항 붙이기  /  파일을 끌어다 놓거나 선택하세요")
         heading.setFixedHeight(40)
-        heading.setStyleSheet(f"padding-left:28px; font-family:{MONO}; font-size:12px;")
+        heading.setStyleSheet(f"color:{TEXT}; padding-left:28px; font-family:{MONO}; font-size:12px;")
         layout.addWidget(heading)
         layout.addWidget(self._rule(1))
         row1 = self._merge_field("파일 1 · 크롤링 결과 엑셀")
@@ -1188,6 +1193,7 @@ class MainWindow(QMainWindow):
         row1.addWidget(self.merge_crawl)
         row1.addWidget(self._small_btn("선택", lambda: self._pick_file(self.merge_crawl)))
         layout.addLayout(row1)
+        layout.addWidget(self._rule(1))
 
         row2 = self._merge_field("파일 2 · 품목 허가(신고)사항  (전자민원 → 나의민원 → 엑셀 다운로드)")
         self.merge_permit = DropLineEdit()
@@ -1196,6 +1202,7 @@ class MainWindow(QMainWindow):
         row2.addWidget(self.merge_permit)
         row2.addWidget(self._small_btn("선택", lambda: self._pick_file(self.merge_permit)))
         layout.addLayout(row2)
+        layout.addWidget(self._rule(1))
 
         output = QFrame()
         output.setFixedHeight(56)
@@ -1473,8 +1480,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "기존 결과 필요", "중간 저장 JSON 또는 기존 결과 Excel/JSON 파일을 선택하세요.")
             return
         self._clear_log()
+        self._log_table_mode = "crawl"
         self.btn_crawl.setEnabled(False)
         self.btn_repair.setEnabled(False)
+        self.btn_merge.setEnabled(False)
         self.btn_crawl.setText("누락분 수집 중..." if repair else "수집 중...")
         self.btn_stop.setEnabled(True)
         self.chk_fast.setEnabled(False)
@@ -1506,6 +1515,7 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.btn_crawl.setEnabled(self._driver_alive())
         self.btn_repair.setEnabled(self._driver_alive())
+        self.btn_merge.setEnabled(True)
         self.btn_crawl.setText("② 크롤링 시작")
         self.btn_stop.setEnabled(False)
         self.chk_fast.setEnabled(True)
@@ -1531,6 +1541,8 @@ class MainWindow(QMainWindow):
             self._open_path(path)
 
     def _start_merge(self):
+        if self.worker:
+            return  # 크롤링 중에는 같은 진행률/결과 표를 병합 작업과 공유하지 않는다.
         cf = self.merge_crawl.text().strip()
         pf = self.merge_permit.text().strip()
         od = self.merge_output.text().strip()
@@ -1540,7 +1552,10 @@ class MainWindow(QMainWindow):
             if not Path(f).is_file():
                 self._log(f"파일을 찾을 수 없습니다: {f}", "err"); return
         self._clear_log()
+        self._log_table_mode = "merge"
         self.btn_merge.setEnabled(False)
+        self.btn_crawl.setEnabled(False)
+        self.btn_repair.setEnabled(False)
         self.btn_merge.setText("병합 중...")
         self._set_progress(0)
 
@@ -1553,6 +1568,8 @@ class MainWindow(QMainWindow):
 
     def _merge_done(self, ok, msg):
         self.btn_merge.setEnabled(True)
+        self.btn_crawl.setEnabled(self._driver_alive())
+        self.btn_repair.setEnabled(self._driver_alive())
         self.btn_merge.setText("파일 병합 시작")
         if ok:
             self._set_result_buttons("merge", msg)
@@ -1592,7 +1609,7 @@ class MainWindow(QMainWindow):
             if brief:
                 self.lbl_log_summary.setText(brief[:100] + ("…" if len(brief) > 100 else ""))
                 self.lbl_log_summary.setToolTip(brief)
-                if self.tabs.currentIndex() == 1:
+                if self._log_table_mode == "merge":
                     self._table_message(brief, level)
         try:
             with open(LOG_FILE, "a", encoding="utf-8") as f:
@@ -1630,7 +1647,7 @@ class MainWindow(QMainWindow):
             item = QTableWidgetItem(value)
             item.setFlags(Qt.ItemFlag.ItemIsEnabled)
             item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter |
-                                  (Qt.AlignmentFlag.AlignRight if col == 3 else Qt.AlignmentFlag.AlignLeft))
+                                  (Qt.AlignmentFlag.AlignRight if col >= 2 else Qt.AlignmentFlag.AlignLeft))
             color = "white" if status == "RUN" else (DANGER if status == "FAIL" and col == 3 else
                     SUCCESS if status == "OK" and col == 3 else FAINT if col == 0 else TEXT)
             item.setForeground(QColor(color))
