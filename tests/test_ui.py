@@ -2,7 +2,10 @@
 
 import importlib.util
 import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -45,8 +48,40 @@ class LayoutTests(unittest.TestCase):
 
             window.tabs.setCurrentIndex(1)
             self.application.processEvents()
-            self.assertEqual(window.tabs.height(), 250)
+            self.assertEqual(window.tabs.height(), 252)
             self.assertIsNotNone(window.merge_permit)
+        finally:
+            window.close()
+
+    def test_dark_palette_labels_and_tab_switch_during_crawl(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QLabel
+        from app import MainWindow
+
+        window = MainWindow()
+        try:
+            window.show()
+            self.application.processEvents()
+            self.assertIn("color:#0a0a0a", window.lbl_status.styleSheet())
+            self.assertIn("color:#0a0a0a", window.lbl_pct.styleSheet())
+            heading = next(label for label in window.findChildren(QLabel)
+                           if label.text().startswith("크롤링 결과에 전자민원"))
+            self.assertIn("color:#0a0a0a", heading.styleSheet())
+            for col in (0, 1):
+                self.assertTrue(window.log_table.horizontalHeaderItem(col).textAlignment()
+                                & Qt.AlignmentFlag.AlignLeft)
+            for col in (2, 3):
+                self.assertTrue(window.log_table.horizontalHeaderItem(col).textAlignment()
+                                & Qt.AlignmentFlag.AlignRight)
+
+            window.tabs.setCurrentIndex(1)
+            window._table_event(38, "수허21-250호", 74, "OK")
+            with tempfile.TemporaryDirectory() as tmp, patch("app.LOG_FILE", Path(tmp) / "ui.log"):
+                window._log("[38/227] 수허21-250호 OK (74개 항목)", "ok")
+                self.assertEqual(window.log_table.rowCount(), 1)
+                window._log_table_mode = "merge"
+                window._log("병합 완료", "ok")
+                self.assertEqual(window.log_table.rowCount(), 2)
         finally:
             window.close()
 
