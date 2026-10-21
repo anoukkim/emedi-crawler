@@ -23,7 +23,8 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QTextEdit, QProgressBar,
     QFileDialog, QFrame, QStackedWidget, QMessageBox, QCheckBox,
     QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QSizePolicy, QStyledItemDelegate, QStyleOptionViewItem
+    QAbstractItemView, QSizePolicy, QStyledItemDelegate, QStyleOptionViewItem,
+    QSizeGrip
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QUrl, QEvent
 from PyQt6.QtGui import QFont, QFontDatabase, QDesktopServices, QColor, QPainter
@@ -69,6 +70,7 @@ LIST_COLS = [
 ]
 
 MODAL_SEL = ".modal__frame.fit_modal_open"
+RESIZE_MARGIN = 8   # 창 가장자리에서 크기 조절이 잡히는 폭 (px)
 
 # 수집 엑셀 시트: 첫 시트는 모델명(UPN)별, 둘째 시트는 허가증 1건당 1행 (누락분 수집용)
 SHEET_MODELS  = "모델명별"
@@ -884,6 +886,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setMinimumSize(840, 620)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)   # 가장자리에서 크기 조절 커서 표시
         avail = QApplication.primaryScreen().availableGeometry() if QApplication.primaryScreen() else None
         w, h = 1264, 1180
         if avail:
@@ -1075,6 +1078,11 @@ class MainWindow(QMainWindow):
         credit = QLabel(f"DEV. YURI KIM · {APP_DATE}")
         credit.setStyleSheet(f"color:{MUTED}; font-family:{MONO}; font-size:11px; border:0;")
         fl.addWidget(credit)
+        # 오른쪽 아래 모서리를 끌어서 창 크기 조절
+        grip = QSizeGrip(footer)
+        grip.setFixedSize(16, 16)
+        grip.setStyleSheet("border:0; background:transparent;")
+        fl.addWidget(grip, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
         root.addWidget(footer)
 
     def _nav_button(self, label, index):
@@ -1101,16 +1109,35 @@ class MainWindow(QMainWindow):
         line.setStyleSheet(f"background:{TEXT}; border:0;")
         return line
 
+    def _resize_edge(self, pos):
+        """창 가장자리(RESIZE_MARGIN px 안쪽)에 있으면 그 방향, 아니면 Qt.Edge(0)"""
+        edge = Qt.Edge(0)
+        if self.isMaximized():
+            return edge
+        if pos.x() < RESIZE_MARGIN: edge |= Qt.Edge.LeftEdge
+        elif pos.x() >= self.width() - RESIZE_MARGIN: edge |= Qt.Edge.RightEdge
+        if pos.y() < RESIZE_MARGIN: edge |= Qt.Edge.TopEdge
+        elif pos.y() >= self.height() - RESIZE_MARGIN: edge |= Qt.Edge.BottomEdge
+        return edge
+
     def eventFilter(self, obj, event):
-        if (event.type() == QEvent.Type.MouseButtonPress and
+        if obj is self and event.type() == QEvent.Type.HoverMove:
+            edge = self._resize_edge(event.position().toPoint())
+            E = Qt.Edge
+            if edge in (E.LeftEdge | E.TopEdge, E.RightEdge | E.BottomEdge):
+                self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            elif edge in (E.RightEdge | E.TopEdge, E.LeftEdge | E.BottomEdge):
+                self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+            elif edge in (E.LeftEdge, E.RightEdge):
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            elif edge in (E.TopEdge, E.BottomEdge):
+                self.setCursor(Qt.CursorShape.SizeVerCursor)
+            else:
+                self.unsetCursor()
+        elif (event.type() == QEvent.Type.MouseButtonPress and
                 event.button() == Qt.MouseButton.LeftButton and
-                isinstance(obj, QWidget) and obj.window() is self and not self.isMaximized()):
-            pos = self.mapFromGlobal(event.globalPosition().toPoint())
-            edge = Qt.Edge(0)
-            if pos.x() < 6: edge |= Qt.Edge.LeftEdge
-            elif pos.x() >= self.width() - 6: edge |= Qt.Edge.RightEdge
-            if pos.y() < 6: edge |= Qt.Edge.TopEdge
-            elif pos.y() >= self.height() - 6: edge |= Qt.Edge.BottomEdge
+                isinstance(obj, QWidget) and obj.window() is self):
+            edge = self._resize_edge(self.mapFromGlobal(event.globalPosition().toPoint()))
             if edge and self.windowHandle() and self.windowHandle().startSystemResize(edge):
                 return True
         return super().eventFilter(obj, event)

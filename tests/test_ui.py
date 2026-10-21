@@ -85,6 +85,25 @@ class LayoutTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_window_resizes(self):
+        from PyQt6.QtCore import QPoint, Qt
+        from PyQt6.QtWidgets import QSizeGrip
+        from app import MainWindow
+
+        window = MainWindow()
+        try:
+            window.show()
+            for w, h in ((900, 640), (1400, 1000)):
+                window.resize(w, h)
+                self.application.processEvents()
+                self.assertEqual((window.width(), window.height()), (w, h))
+            self.assertTrue(window.findChildren(QSizeGrip))
+            self.assertEqual(window._resize_edge(QPoint(2, 300)), Qt.Edge.LeftEdge)
+            self.assertEqual(window._resize_edge(QPoint(1399, 999)), Qt.Edge.RightEdge | Qt.Edge.BottomEdge)
+            self.assertEqual(window._resize_edge(QPoint(500, 300)), Qt.Edge(0))
+        finally:
+            window.close()
+
 
 if __name__ == "__main__":
     unittest.main()
