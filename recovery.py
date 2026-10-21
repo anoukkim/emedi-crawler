@@ -39,7 +39,8 @@ def load_existing_records(path):
     elif source.suffix.lower() == ".xlsx":
         import pandas as pd
         # 모델명별로 늘린 시트는 같은 허가가 여러 행이므로, 허가증 1건당 1행인 시트를 읽는다
-        sheets = pd.ExcelFile(source, engine="openpyxl").sheet_names
+        with pd.ExcelFile(source, engine="openpyxl") as book:
+            sheets = book.sheet_names
         sheet = PERMIT_SHEET if PERMIT_SHEET in sheets else 0
         records = pd.read_excel(source, sheet_name=sheet, engine="openpyxl", dtype=str).fillna("").to_dict("records")
     else:

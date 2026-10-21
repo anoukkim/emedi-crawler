@@ -72,7 +72,7 @@ LIST_COLS = [
 MODAL_SEL = ".modal__frame.fit_modal_open"
 RESIZE_MARGIN = 8   # 창 가장자리에서 크기 조절이 잡히는 폭 (px)
 
-# 수집 엑셀 시트: 첫 시트는 모델명(UPN)별, 둘째 시트는 허가증 1건당 1행 (누락분 수집용)
+# 수집 엑셀 시트: 첫 시트는 허가증 1건당 1행 (기존), 둘째 시트는 모델명(UPN)별로 늘린 행
 SHEET_MODELS  = "모델명별"
 SHEET_PERMITS = PERMIT_SHEET
 
@@ -590,10 +590,10 @@ class CrawlWorker(QObject):
         df_models = self._frame(expand_records(records))
 
         path = unique_path(self.output_dir / f"{self.file_name}.xlsx")
-        self.log.emit(f"  엑셀 저장 중... (모델명별 {len(df_models)}행 / 허가증별 {len(df)}행)", "dim")
+        self.log.emit(f"  엑셀 저장 중... (허가증별 {len(df)}행 / 모델명별 {len(df_models)}행)", "dim")
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
-            df_models.to_excel(writer, sheet_name=SHEET_MODELS, index=False)
             df.to_excel(writer, sheet_name=SHEET_PERMITS, index=False)
+            df_models.to_excel(writer, sheet_name=SHEET_MODELS, index=False)
         self.log.emit(f"  ✓  저장: {path}", "ok")
         return path
 
@@ -742,10 +742,12 @@ class MergeWorker(QObject):
             self.log.emit("▶  파일 로딩 중", "section")
             self.progress.emit(10)
 
-            df = pd.read_excel(self.crawl_file, engine="openpyxl")
-            self.log.emit(f"  크롤링 파일: {len(df)}행", "ok")
-            if "품목허가번호" not in df.columns:
-                raise Exception("크롤링 파일에 '품목허가번호' 열이 없습니다. 파일 1을 확인하세요.")
+            # 허가증별/모델명별 시트를 모두 읽음 (예전 크롤링 파일은 시트 1개)
+            sheets = pd.read_excel(self.crawl_file, engine="openpyxl", sheet_name=None)
+            for name, df in sheets.items():
+                self.log.emit(f"  크롤링 파일 [{name}]: {len(df)}행", "ok")
+                if "품목허가번호" not in df.columns:
+                    raise Exception(f"크롤링 파일 '{name}' 시트에 '품목허가번호' 열이 없습니다. 파일 1을 확인하세요.")
             self.progress.emit(30)
 
             # A~F 열을 한 번만 읽음. 허가번호 컬럼(두 번째)은 매칭 키, 나머지에 전자민원_ 접두사
@@ -761,33 +763,38 @@ class MergeWorker(QObject):
             self.progress.emit(50)
 
             self.log.emit("▶  매칭 중", "section")
-            df["_key"]  = df["품목허가번호"].astype(str).str.replace(r"\s", "", regex=True)
             df2["_key"] = df2[permit_no_col].astype(str).str.replace(r"\s", "", regex=True)
             df2 = df2.drop_duplicates(subset=["_key"], keep="first")
 
-            df = df.merge(
-                df2[["_key"] + renamed_cols],
-                on="_key", how="left", indicator="_m"
-            )
-            matched = int((df["_m"] == "both").sum())
-            df = df.drop(columns=["_key", "_m"])
-            self.log.emit(f"  매칭 완료: {matched}/{len(df)}건", "ok")
-            if matched == 0:
-                self.log.emit("  ⚠  매칭된 건이 없습니다. 파일 2의 두 번째 열이 허가번호인지 확인하세요.", "warn")
+            merged = {}
+            for name, df in sheets.items():
+                df["_key"] = df["품목허가번호"].astype(str).str.replace(r"\s", "", regex=True)
+                df = df.merge(
+                    df2[["_key"] + renamed_cols],
+                    on="_key", how="left", indicator="_m"
+                )
+                matched = int((df["_m"] == "both").sum())
+                df = df.drop(columns=["_key", "_m"])
+                self.log.emit(f"  [{name}] 매칭 완료: {matched}/{len(df)}건", "ok")
+                if matched == 0 and len(df):
+                    self.log.emit("  ⚠  매칭된 건이 없습니다. 파일 2의 두 번째 열이 허가번호인지 확인하세요.", "warn")
+                for col in df.columns:
+                    if df[col].apply(lambda x: isinstance(x, (dict, list))).any():
+                        df[col] = df[col].astype(str)
+                merged[name] = df.fillna("")
             self.progress.emit(80)
 
             from openpyxl import load_workbook
             self.output_dir.mkdir(parents=True, exist_ok=True)
             out = unique_path(self.output_dir / f"{self.file_name}.xlsx")
-            df_save = df.copy()
-            for col in df_save.columns:
-                if df_save[col].apply(lambda x: isinstance(x, (dict, list))).any():
-                    df_save[col] = df_save[col].astype(str)
-            df_save = df_save.fillna("")
-            self.log.emit(f"  엑셀 저장 중... ({len(df_save)}행 × {len(df_save.columns)}열)", "dim")
-            df_save.to_excel(out, index=False, engine="openpyxl")
+            self.log.emit("  엑셀 저장 중... (" + " / ".join(
+                f"{name} {len(df)}행 × {len(df.columns)}열" for name, df in merged.items()) + ")", "dim")
+            with pd.ExcelWriter(out, engine="openpyxl") as writer:
+                for name, df in merged.items():
+                    df.to_excel(writer, sheet_name=name, index=False)
             wb = load_workbook(out)
-            format_excel(wb.active, df_save, highlight_cols=set(renamed_cols) if renamed_cols else None)
+            for name, df in merged.items():
+                format_excel(wb[name], df, highlight_cols=set(renamed_cols) if renamed_cols else None)
             wb.save(out)
             self.log.emit(f"  ✓  최종 저장: {out}", "ok")
             self.progress.emit(100)
