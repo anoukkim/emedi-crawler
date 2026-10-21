@@ -15,7 +15,8 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 
-from recovery import build_recovery_plan, detail_complete, load_existing_records
+from recovery import PERMIT_SHEET, build_recovery_plan, detail_complete, load_existing_records
+from models import expand_records
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -69,6 +70,10 @@ LIST_COLS = [
 
 MODAL_SEL = ".modal__frame.fit_modal_open"
 
+# 수집 엑셀 시트: 첫 시트는 모델명(UPN)별, 둘째 시트는 허가증 1건당 1행 (누락분 수집용)
+SHEET_MODELS  = "모델명별"
+SHEET_PERMITS = PERMIT_SHEET
+
 CUR_PAGE_JS = """
 var el = document.querySelector('.paging .num a[title="현재페이지"] b');
 return el ? parseInt(el.innerText) : 0;
@@ -101,15 +106,20 @@ modal.querySelectorAll('table').forEach(function(table){
         var ths=row.querySelectorAll('th'),tds=row.querySelectorAll('td');
         if(ths.length>0&&tds.length===0){colHeaders=Array.from(ths).map(function(th){return cleanText(th);});}
         else if(ths.length>0&&tds.length>0){for(var i=0;i<Math.min(ths.length,tds.length);i++){var k=cleanText(ths[i]),v=tds[i].innerText.trim();if(!k)continue;var key=prefix+'_'+k;
-                if(key.indexOf('UDI_')===0){  // UDI 값엔 쉼표가 들어갈 수 있어 ; 로 구분
-                    result[key]=result[key]?result[key]+'; '+v:v;
+                if(key.indexOf('UDI_')===0){  // UDI 값엔 쉼표가 들어갈 수 있어 ; 로 구분 (빈 값도 자리 유지)
+                    result[key]=(key in result)?result[key]+'; '+v:v;
                 }else{
                     result[key]=result[key]?result[key]+', '+v:v;
                 }}}
-        else if(tds.length>0&&colHeaders.length>0){colHeaders.forEach(function(h,i){if(!h)return;var v=i<tds.length?tds[i].innerText.trim():'';
+        else if(tds.length>0&&colHeaders.length>0){
+            if(prefix==='UDI'&&tds.length>1){  // 모델명(UPN)별 행 분리용: UDI 표 한 행씩 보관
+                var udiRow={};colHeaders.forEach(function(h,i){if(h)udiRow[h]=i<tds.length?tds[i].innerText.trim():'';});
+                (result._UDI_rows=result._UDI_rows||[]).push(udiRow);
+            }
+            colHeaders.forEach(function(h,i){if(!h)return;var v=i<tds.length?tds[i].innerText.trim():'';
                 var key=prefix+'_'+h;
-                if(key.indexOf('UDI_')===0){  // UDI 값엔 쉼표가 들어갈 수 있어 ; 로 구분
-                    result[key]=result[key]?result[key]+'; '+v:v;
+                if(key.indexOf('UDI_')===0){  // UDI 값엔 쉼표가 들어갈 수 있어 ; 로 구분 (빈 값도 자리 유지)
+                    result[key]=(key in result)?result[key]+'; '+v:v;
                 }else{
                     result[key]=result[key]?result[key]+', '+v:v;
                 }});}
@@ -561,14 +571,7 @@ class CrawlWorker(QObject):
 
     def _to_excel(self, records):
         clean = [{k:v for k,v in r.items() if not k.startswith("_")} for r in records]
-        df = pd.json_normalize(clean)
-
-        # dict/list 타입 컬럼 → str 변환
-        for col in df.columns:
-            if df[col].apply(lambda x: isinstance(x, (dict, list))).any():
-                df[col] = df[col].astype(str)
-
-        df = df.fillna("")
+        df = self._frame(clean)
 
         if "UDI_모델명" in df.columns:
             def uniq(val):
@@ -581,15 +584,31 @@ class CrawlWorker(QObject):
             pos = df.columns.get_loc("UDI_모델명") + 1
             df.insert(pos, "모델명_고유", df["UDI_모델명"].apply(uniq))
 
+        # 모델명(UPN)별로 한 행씩, 허가증 공통 항목은 모든 행에 복사
+        df_models = self._frame(expand_records(records))
+
+        path = unique_path(self.output_dir / f"{self.file_name}.xlsx")
+        self.log.emit(f"  엑셀 저장 중... (모델명별 {len(df_models)}행 / 허가증별 {len(df)}행)", "dim")
+        with pd.ExcelWriter(path, engine="openpyxl") as writer:
+            df_models.to_excel(writer, sheet_name=SHEET_MODELS, index=False)
+            df.to_excel(writer, sheet_name=SHEET_PERMITS, index=False)
+        self.log.emit(f"  ✓  저장: {path}", "ok")
+        return path
+
+    def _frame(self, rows):
+        df = pd.json_normalize(rows)
+
+        # dict/list 타입 컬럼 → str 변환
+        for col in df.columns:
+            if df[col].apply(lambda x: isinstance(x, (dict, list))).any():
+                df[col] = df[col].astype(str)
+
+        df = df.fillna("")
+
         if len(df.columns) > 16384:
             self.log.emit(f"  ⚠  컬럼 {len(df.columns)}개 → 16384 초과분 잘라냄", "warn")
             df = df.iloc[:, :16384]
-
-        path = unique_path(self.output_dir / f"{self.file_name}.xlsx")
-        self.log.emit(f"  엑셀 저장 중... ({len(df)}행 × {len(df.columns)}열)", "dim")
-        df.to_excel(path, index=False, engine="openpyxl")
-        self.log.emit(f"  ✓  저장: {path}", "ok")
-        return path
+        return df
 
     def _save_json(self, records, path):
         tmp = Path(str(path) + ".tmp")

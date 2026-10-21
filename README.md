@@ -20,7 +20,8 @@ Built with PyQt6 and Selenium. Works on Windows and macOS.
 - **② 허가사항 병합:** adds the columns from 전자민원's 품목 허가(신고)사항 export to the crawl result, matched by permit number, as a formatted Excel file.
 - You choose the save folder and file name (a dated default is filled in). If the name already exists, `_2`, `_3`, … is added.
 - **파일 열기 / 폴더 열기** buttons open the result when a run finishes.
-- UDI columns separate multiple values with `; `, because values can contain commas.
+- The crawl Excel has two sheets. **모델명별** (first) has one row per model name (UPN): each row gets that model's own UDI values (`UDI_UDI`, `UDI_코드체계`, `UDI_포장 내 수량`, …) and a copy of every permit-wide field (제품정보, 수입업자, …). `모델명(UPN)` and `모델순번` (e.g. `2/3`) lead the sheet. Models come from the popup's 표준코드(UDI) table; a permit without UDI rows is split on `;` in its 모델명 instead, and a permit with no model name stays one row. **허가증별** keeps one row per permit, and is the sheet 누락분만 수집 reads.
+- On the 허가증별 sheet, UDI columns separate multiple values with `; `, because values can contain commas.
 
 For example, if a 125-row partial file has 120 complete rows and 5 failures, and the current search shows 227 results, recovery skips the 120 complete rows and collects the remaining 107. Keep the Chrome search filters the same as the original run. Once it finishes, use the new Excel/JSON output for subsequent work.
 
@@ -45,7 +46,7 @@ Build on the OS you want to run it on.
 | Windows | double-click `build_windows.bat` | `dist\emedi_crawler\emedi_crawler.exe`. Keep the whole folder together and make a desktop shortcut to the exe. |
 | macOS | `bash build_mac.sh` | `dist/emedi_crawler.app`. Drag it to Applications. The first time, right-click it and choose Open. |
 
-The built app doesn't need Python, only Chrome. Rebuild after changing `app.py` or `recovery.py`.
+The built app doesn't need Python, only Chrome. Rebuild after changing `app.py`, `recovery.py`, or `models.py`.
 
 If something goes wrong in the built app, details are written to `~/emedi_crawler.log`.
 

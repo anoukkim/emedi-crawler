@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 DETAIL_PREFIXES = ("제품정보_", "UDI_", "수입업자_", "기타정보_", "보험_")
+PERMIT_SHEET = "허가증별"
 
 
 def record_key(record):
@@ -37,7 +38,10 @@ def load_existing_records(path):
             records = json.load(handle)
     elif source.suffix.lower() == ".xlsx":
         import pandas as pd
-        records = pd.read_excel(source, engine="openpyxl", dtype=str).fillna("").to_dict("records")
+        # 모델명별로 늘린 시트는 같은 허가가 여러 행이므로, 허가증 1건당 1행인 시트를 읽는다
+        sheets = pd.ExcelFile(source, engine="openpyxl").sheet_names
+        sheet = PERMIT_SHEET if PERMIT_SHEET in sheets else 0
+        records = pd.read_excel(source, sheet_name=sheet, engine="openpyxl", dtype=str).fillna("").to_dict("records")
     else:
         raise ValueError("기존 결과는 .json 또는 .xlsx 파일을 선택하세요.")
     if not isinstance(records, list) or not records or not all(isinstance(r, dict) and record_key(r) for r in records):
