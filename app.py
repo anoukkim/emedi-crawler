@@ -36,7 +36,8 @@ DANGER    = "#e5281b"
 BG        = "#ffffff"
 CARD      = "#ffffff"
 BORDER    = "#0a0a0a"
-ROW_BORDER = "#e3e3e3"
+ROW_BORDER = "#cfcfcf"
+LABEL_BG  = "#f2f2f2"   # 라벨 칸 / 표 머리글 배경: 영역 구분용
 TEXT      = "#0a0a0a"
 MUTED     = "#5c5c5c"
 FAINT     = "#9a9a9a"
@@ -926,9 +927,8 @@ class MainWindow(QMainWindow):
         nl = QHBoxLayout(nav)
         nl.setContentsMargins(0, 0, 0, 0)
         nl.setSpacing(0)
-        brand = QWidget()
+        brand = QFrame()
         brand.setFixedWidth(276)
-        brand.setStyleSheet(f"border-right:1px solid {TEXT}; border-bottom:0;")
         brand_row = QHBoxLayout(brand)
         brand_row.setContentsMargins(28, 0, 14, 0)
         brand_row.setSpacing(9)
@@ -938,14 +938,19 @@ class MainWindow(QMainWindow):
         site.setStyleSheet(f"font-family:{MONO}; font-size:11px; color:{MUTED}; border:0;")
         brand_row.addWidget(logo)
         brand_row.addWidget(site)
+        brand_row.addStretch()
         nl.addWidget(brand)
+        nl.addWidget(self._vrule())
         self.tab_crawl = self._nav_button("01  크롤링", 0)
         self.tab_merge = self._nav_button("02  허가사항 병합", 1)
         nl.addWidget(self.tab_crawl)
+        nl.addWidget(self._vrule())
         nl.addWidget(self.tab_merge)
+        nl.addWidget(self._vrule())
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         nl.addWidget(spacer)
+        nl.addWidget(self._vrule())
         self.lbl_chrome = QLabel()
         self.lbl_chrome.setFixedWidth(208)
         self.lbl_chrome.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -966,7 +971,9 @@ class MainWindow(QMainWindow):
         self.tile_done = self._tile("완료", "0", TEXT)
         self.tile_fail = self._tile("실패 · 재시도 2회", "0", DANGER)
         self.tile_eta = self._tile("남은 시간", "—", TEXT)
-        for tile in (self.tile_total, self.tile_done, self.tile_fail, self.tile_eta):
+        for i, tile in enumerate((self.tile_total, self.tile_done, self.tile_fail, self.tile_eta)):
+            if i:
+                sl.addWidget(self._vrule())
             sl.addWidget(tile, 1)
         self.tile_pending = self.tile_total.pending
         root.addWidget(stats)
@@ -1026,8 +1033,8 @@ class MainWindow(QMainWindow):
         self.log_table.horizontalHeader().setFixedHeight(34)
         self.log_table.setStyleSheet(f"""
             QTableWidget {{ background:white; border:0; color:{TEXT}; font-family:{MONO}; font-size:13px; }}
-            QHeaderView::section {{ background:white; color:{MUTED}; border:0; border-bottom:1px solid {TEXT};
-                padding-left:28px; font-family:{MONO}; font-size:11px; letter-spacing:1px; text-align:left; }}
+            QHeaderView::section {{ background:{LABEL_BG}; color:{MUTED}; border:0; border-bottom:1px solid {TEXT};
+                padding:0 26px; font-family:{MONO}; font-size:11px; letter-spacing:1px; }}
         """)
         root.addWidget(self.log_table, 1)
 
@@ -1040,9 +1047,11 @@ class MainWindow(QMainWindow):
                                    f"font-family:{MONO}; font-size:12px; padding:8px 28px; border-radius:0; }}")
         root.addWidget(self.log_box)
 
+        root.addWidget(self._rule(2))
         footer = QFrame()
+        footer.setObjectName("footer")
         footer.setFixedHeight(40)
-        footer.setStyleSheet(f"background:white; border-top:2px solid {TEXT};")
+        footer.setStyleSheet("#footer { background:white; }")
         fl = QHBoxLayout(footer)
         fl.setContentsMargins(28, 0, 28, 0)
         fl.setSpacing(20)
@@ -1061,7 +1070,7 @@ class MainWindow(QMainWindow):
     def _nav_button(self, label, index):
         b = QPushButton(label)
         b.setFixedWidth(184 if index else 132)
-        b.setFixedHeight(62)
+        b.setFixedHeight(64)
         b.clicked.connect(lambda: self.tabs.setCurrentIndex(index))
         return b
 
@@ -1069,7 +1078,7 @@ class MainWindow(QMainWindow):
         self.tabs.setFixedHeight(165 if index == 0 else 252)
         for i, b in enumerate((self.tab_crawl, self.tab_merge)):
             color, bg = ("white", PRIMARY) if i == index else (TEXT, "white")
-            b.setStyleSheet(f"QPushButton {{ background:{bg}; color:{color}; border:0; border-right:1px solid {TEXT};"
+            b.setStyleSheet(f"QPushButton {{ background:{bg}; color:{color}; border:0;"
                             f"border-radius:0; font-family:{MONO}; font-size:12px; font-weight:600; }}"
                             f"QPushButton:hover {{ background:{PRIMARY if i == index else '#f2f2f2'}; }}")
 
@@ -1077,10 +1086,43 @@ class MainWindow(QMainWindow):
         self.showNormal() if self.isMaximized() else self.showMaximized()
 
     def _rule(self, thickness):
+        """가로 구분선 (실제 위젯이라 어떤 칸에서도 항상 보인다)"""
         line = QFrame()
         line.setFixedHeight(thickness)
         line.setStyleSheet(f"background:{TEXT}; border:0;")
         return line
+
+    def _vrule(self, thickness=1):
+        """세로 구분선. 행 높이 전체를 채운다.
+        (Qt에서 일반 QWidget에 준 border-left/right는 그려지지 않아 선이 사라졌었다)"""
+        line = QFrame()
+        line.setFixedWidth(thickness)
+        line.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        line.setStyleSheet(f"background:{TEXT}; border:0;")
+        return line
+
+    def _label_cell(self, text, width):
+        """회색 라벨 칸 + 오른쪽 구분선: 입력 행이 표처럼 구분되어 보인다."""
+        cell = QFrame()
+        cell.setObjectName("labelCell")
+        cell.setFixedWidth(width)
+        cell.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        cell.setStyleSheet(f"#labelCell {{ background:{LABEL_BG}; }}")
+        lay = QHBoxLayout(cell)
+        lay.setContentsMargins(28, 0, 12, 0)
+        lay.addWidget(self._field_label(text))
+        return cell
+
+    def _row_frame(self, height):
+        """높이가 고정된 한 행. 안의 버튼/구분선이 행 높이를 꽉 채운다."""
+        f = QFrame()
+        f.setObjectName("rowFrame")
+        f.setFixedHeight(height)
+        f.setStyleSheet("#rowFrame { background:white; }")
+        lay = QHBoxLayout(f)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        return f, lay
 
     def eventFilter(self, obj, event):
         if (event.type() == QEvent.Type.MouseButtonPress and
@@ -1103,12 +1145,8 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        controls = QFrame()
-        controls.setFixedHeight(56)
-        controls.setStyleSheet("background:white;")
-        row = QHBoxLayout(controls)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(0)
+        # 행 1: 실행 버튼 | 빠른 모드 | 결과 열기
+        controls, row = self._row_frame(56)
         self.btn_open = self._btn("① 크롬 열기", CARD, self._open_site)
         self.btn_crawl = self._btn("② 크롤링 시작", PRIMARY, self._start_crawl)
         self.btn_crawl.setEnabled(False)
@@ -1117,6 +1155,7 @@ class MainWindow(QMainWindow):
         for b, width in ((self.btn_open, 150), (self.btn_crawl, 165), (self.btn_stop, 125)):
             b.setFixedWidth(width)
             row.addWidget(b)
+            row.addWidget(self._vrule())
 
         self.chk_fast = QCheckBox("빠른 모드 (실험적)")
         self.chk_fast.setChecked(False)
@@ -1126,7 +1165,6 @@ class MainWindow(QMainWindow):
                                     f"QCheckBox::indicator {{ width:15px; height:15px; border:1px solid {TEXT}; border-radius:0; background:white; }}"
                                     f"QCheckBox::indicator:checked {{ background:{PRIMARY}; }}")
         fast = QWidget()
-        fast.setStyleSheet(f"border-left:1px solid {TEXT}; border-bottom:0;")
         fast_row = QHBoxLayout(fast)
         fast_row.setContentsMargins(22, 0, 8, 0)
         fast_row.setSpacing(12)
@@ -1141,33 +1179,30 @@ class MainWindow(QMainWindow):
             lambda: self._open_path(Path(self._last_crawl_file).parent if self._last_crawl_file else None))
         for b in (self.btn_crawl_open, self.btn_crawl_dir):
             b.setFixedWidth(118)
+            row.addWidget(self._vrule())
             row.addWidget(b)
         layout.addWidget(controls)
         layout.addWidget(self._rule(1))
 
-        output = QFrame()
-        output.setFixedHeight(56)
-        output.setStyleSheet("background:white;")
-        output_row = QHBoxLayout(output)
-        output_row.setContentsMargins(0, 0, 0, 0)
-        output_row.setSpacing(0)
+        # 행 2: 저장 폴더 | 파일명
+        output, output_row = self._row_frame(56)
         self.crawl_output, self.crawl_name = self._save_fields(output_row, default_crawl_name())
         layout.addWidget(output)
         layout.addWidget(self._rule(2))
 
-        repair = QFrame()
-        repair.setFixedHeight(48)
-        repair.setStyleSheet("background:white;")
-        repair_row = QHBoxLayout(repair)
-        repair_row.setContentsMargins(28, 0, 0, 0)
-        repair_row.setSpacing(0)
-        repair_row.addWidget(self._field_label("기존 결과"))
+        # 행 3: 기존 결과 (누락분 수집)
+        repair, repair_row = self._row_frame(48)
+        repair_row.addWidget(self._label_cell("기존 결과", 132))
+        repair_row.addWidget(self._vrule())
         self.recovery_file = DropLineEdit()
         self.recovery_file.setPlaceholderText("기존 결과 .json / .xlsx (중간 저장 파일도 가능)")
         self._style_input(self.recovery_file)
         repair_row.addWidget(self.recovery_file, 1)
+        repair_row.addWidget(self._vrule())
         repair_row.addWidget(self._small_btn("기존 결과 선택", self._pick_recovery))
+        repair_row.addWidget(self._vrule())
         self.btn_repair = self._ghost_btn("누락분만 수집", lambda: self._start_crawl(repair=True))
+        self.btn_repair.setFixedWidth(118)
         self.btn_repair.setEnabled(False)
         repair_row.addWidget(self.btn_repair)
         layout.addWidget(repair)
@@ -1182,101 +1217,87 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         heading = QLabel("크롤링 결과에 전자민원 허가사항 붙이기  /  파일을 끌어다 놓거나 선택하세요")
-        heading.setFixedHeight(40)
-        heading.setStyleSheet(f"color:{TEXT}; padding-left:28px; font-family:{MONO}; font-size:12px;")
+        heading.setFixedHeight(38)
+        heading.setStyleSheet(f"color:{TEXT}; background:white; padding-left:28px; font-family:{MONO}; font-size:12px;")
         layout.addWidget(heading)
         layout.addWidget(self._rule(1))
-        row1 = self._merge_field("파일 1 · 크롤링 결과 엑셀")
+
         self.merge_crawl = DropLineEdit()
         self.merge_crawl.setPlaceholderText("여기에 파일을 끌어다 놓기")
-        self._style_input(self.merge_crawl)
-        row1.addWidget(self.merge_crawl)
-        row1.addWidget(self._small_btn("선택", lambda: self._pick_file(self.merge_crawl)))
-        layout.addLayout(row1)
+        layout.addWidget(self._merge_field("파일 1 · 크롤링 결과 엑셀", self.merge_crawl))
         layout.addWidget(self._rule(1))
 
-        row2 = self._merge_field("파일 2 · 품목 허가(신고)사항  (전자민원 → 나의민원 → 엑셀 다운로드)")
         self.merge_permit = DropLineEdit()
         self.merge_permit.setPlaceholderText("품목+허가(신고)사항.xlsx")
-        self._style_input(self.merge_permit)
-        row2.addWidget(self.merge_permit)
-        row2.addWidget(self._small_btn("선택", lambda: self._pick_file(self.merge_permit)))
-        layout.addLayout(row2)
+        layout.addWidget(self._merge_field("파일 2 · 품목 허가(신고)사항\n(전자민원 → 나의민원 → 엑셀 다운로드)",
+                                           self.merge_permit))
         layout.addWidget(self._rule(1))
 
-        output = QFrame()
-        output.setFixedHeight(56)
-        output.setStyleSheet("background:white;")
-        ol = QHBoxLayout(output)
-        ol.setContentsMargins(0, 0, 0, 0)
-        ol.setSpacing(0)
+        output, ol = self._row_frame(56)
         self.merge_output, self.merge_name = self._save_fields(ol, default_merge_name())
         layout.addWidget(output)
         layout.addWidget(self._rule(1))
 
-        btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(0, 0, 0, 0)
-        btn_row.setSpacing(0)
+        buttons, btn_row = self._row_frame(56)
         self.btn_merge = self._btn("파일 병합 시작", PRIMARY, self._start_merge)
         self.btn_merge_open = self._ghost_btn("파일 열기 ↗", lambda: self._open_path(self._last_merge_file))
         self.btn_merge_dir  = self._ghost_btn("폴더 열기 ↗",
             lambda: self._open_path(Path(self._last_merge_file).parent if self._last_merge_file else None))
         btn_row.addWidget(self.btn_merge, 3)
+        btn_row.addWidget(self._vrule())
         btn_row.addWidget(self.btn_merge_open, 1)
+        btn_row.addWidget(self._vrule())
         btn_row.addWidget(self.btn_merge_dir, 1)
-        layout.addLayout(btn_row)
+        layout.addWidget(buttons)
+        layout.addWidget(self._rule(2))
         self._set_result_buttons("merge", None)
         return w
 
-    def _merge_field(self, text):
-        row = QHBoxLayout()
-        row.setContentsMargins(28, 0, 0, 0)
-        row.setSpacing(0)
-        label = self._field_label(text)
-        label.setMinimumWidth(460)
-        row.addWidget(label)
-        return row
+    def _merge_field(self, text, edit):
+        """파일 선택 한 행: 회색 라벨 | 입력칸 | 선택"""
+        frame, row = self._row_frame(48)
+        row.addWidget(self._label_cell(text, 360))
+        row.addWidget(self._vrule())
+        self._style_input(edit)
+        row.addWidget(edit, 1)
+        row.addWidget(self._vrule())
+        pick = self._small_btn("선택", lambda: self._pick_file(edit))
+        pick.setFixedWidth(118)
+        row.addWidget(pick)
+        return frame
 
     # ── UI 헬퍼 ───────────────────────────────────────────
     def _save_fields(self, layout, default_name):
-        """저장 폴더 + 파일 이름 입력칸"""
-        left = QWidget()
-        left.setStyleSheet(f"border-right:1px solid {TEXT};")
-        row_dir = QHBoxLayout(left)
-        row_dir.setContentsMargins(28, 0, 0, 0)
-        row_dir.setSpacing(0)
-        row_dir.addWidget(self._field_label("저장 폴더"))
+        """저장 폴더 + 파일 이름 입력칸 (회색 라벨 칸과 세로선으로 구분)"""
+        layout.addWidget(self._label_cell("저장 폴더", 132))
+        layout.addWidget(self._vrule())
         out = DropLineEdit(str(default_output_dir()))
         self._style_input(out)
-        row_dir.addWidget(out, 1)
-        row_dir.addWidget(self._small_btn("변경", lambda: self._pick_dir(out)))
-
-        right = QWidget()
-        row_name = QHBoxLayout(right)
-        row_name.setContentsMargins(16, 0, 28, 0)
-        row_name.setSpacing(8)
-        row_name.addWidget(self._field_label("파일명"))
+        layout.addWidget(out, 3)
+        layout.addWidget(self._vrule())
+        layout.addWidget(self._small_btn("변경", lambda: self._pick_dir(out)))
+        layout.addWidget(self._vrule())
+        layout.addWidget(self._label_cell("파일명", 104))
+        layout.addWidget(self._vrule())
         name = QLineEdit(default_name)
         name.setPlaceholderText(default_name)
         name.setToolTip("같은 이름의 파일이 있으면 _2, _3 … 이 붙어 저장됩니다.")
         self._style_input(name)
         ext = QLabel(".xlsx")
-        ext.setStyleSheet(f"color:{MUTED}; font-family:{MONO}; font-size:11px;")
-        row_name.addWidget(name, 1)
-        row_name.addWidget(ext)
-        layout.addWidget(left, 3)
-        layout.addWidget(right, 2)
+        ext.setStyleSheet(f"color:{MUTED}; font-family:{MONO}; font-size:11px; padding-right:28px;")
+        layout.addWidget(name, 2)
+        layout.addWidget(ext)
         return out, name
 
     def _field_label(self, text):
         l = QLabel(text)
         l.setStyleSheet(f"color:{MUTED}; font-family:{MONO}; font-size:11px; letter-spacing:1px; border:0;")
-        l.setContentsMargins(0, 0, 16, 0)
         return l
 
     def _tile(self, label, value, color):
         t = QFrame()
-        t.setStyleSheet(f"background:white; border-right:1px solid {TEXT};")
+        t.setObjectName("tile")
+        t.setStyleSheet("#tile { background:white; }")
         v = QVBoxLayout(t)
         v.setContentsMargins(28, 12, 20, 6)
         v.setSpacing(2)
@@ -1293,33 +1314,37 @@ class MainWindow(QMainWindow):
             v.addWidget(t.pending)
         return t
 
+    def _fill_row(self, b):
+        """버튼이 행 높이를 꽉 채워 세로선과 끝이 맞도록"""
+        b.setSizePolicy(b.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Expanding)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+
     def _btn(self, text, color, slot):
         b = QPushButton(text)
-        b.setFixedHeight(56)
-        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fill_row(b)
         fg = "white" if color != CARD else TEXT
         hover = self._dk(color) if color != CARD else "#f2f2f2"
+        disabled_fg = FAINT if color == CARD else "rgba(255,255,255,0.55)"
         b.setStyleSheet(f"""
             QPushButton {{
                 background:{color}; color:{fg};
                 font-family:{SANS}; font-size:13px; font-weight:700;
-                border-radius:0; border:0; border-right:1px solid {TEXT};
+                border-radius:0; border:0;
             }}
             QPushButton:hover {{ background:{hover}; }}
-            QPushButton:disabled {{ background:{color}; color:{FAINT}; }}
+            QPushButton:disabled {{ background:{color}; color:{disabled_fg}; }}
         """)
         b.clicked.connect(slot)
         return b
 
     def _ghost_btn(self, text, slot):
         b = QPushButton(text)
-        b.setFixedHeight(56)
-        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fill_row(b)
         b.setStyleSheet(f"""
             QPushButton {{
                 background:white; color:{TEXT}; font-family:{SANS};
                 font-size:12px; font-weight:500;
-                border-radius:0; border:0; border-left:1px solid {TEXT}; padding:0 14px;
+                border-radius:0; border:0; padding:0 14px;
             }}
             QPushButton:hover {{ background:#f2f2f2; }}
             QPushButton:disabled {{ color:{FAINT}; }}
@@ -1329,13 +1354,12 @@ class MainWindow(QMainWindow):
 
     def _small_btn(self, text, slot):
         b = QPushButton(text)
-        b.setFixedHeight(48)
-        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fill_row(b)
         b.setStyleSheet(f"""
             QPushButton {{
                 background:white; color:{PRIMARY}; font-family:{SANS};
                 font-size:12px; font-weight:700;
-                border-radius:0; border:0; border-left:1px solid {TEXT}; padding:0 16px;
+                border-radius:0; border:0; padding:0 18px;
             }}
             QPushButton:hover {{ background:#f2f2f2; }}
         """)
@@ -1367,7 +1391,7 @@ class MainWindow(QMainWindow):
         dot, text = ("#00b35c", "CHROME · CONNECTED") if connected else (FAINT, "CHROME · DISCONNECTED")
         self.lbl_chrome.setText(f"<span style='color:{dot};'>■</span> &nbsp; {text}")
         self.lbl_chrome.setStyleSheet(f"""
-            color:{MUTED}; background:white; border-left:1px solid {TEXT}; border-bottom:0;
+            color:{MUTED}; background:white; border:0;
             font-family:{MONO}; font-size:11px;
         """)
 
@@ -1699,8 +1723,8 @@ def load_ui_fonts():
     """설치 여부에 의존하지 않도록 SIL OFL 글꼴을 앱에 등록한다."""
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "fonts"
     for name in (
-        "IBMPlexSansKR-Regular.woff", "IBMPlexSansKR-Medium.woff", "IBMPlexSansKR-Bold.woff",
-        "IBMPlexMono-Regular.woff", "IBMPlexMono-Medium.woff", "IBMPlexMono-SemiBold.woff",
+        "IBMPlexSansKR-Regular.ttf", "IBMPlexSansKR-Medium.ttf", "IBMPlexSansKR-Bold.ttf",
+        "IBMPlexMono-Regular.ttf", "IBMPlexMono-Medium.ttf", "IBMPlexMono-SemiBold.ttf",
     ):
         if (base / name).is_file():
             QFontDatabase.addApplicationFont(str(base / name))
