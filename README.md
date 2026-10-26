@@ -21,6 +21,7 @@ Built with PyQt6 and Selenium. Works on Windows and macOS.
 - You choose the save folder and file name (a dated default is filled in). If the name already exists, `_2`, `_3`, … is added.
 - **파일 열기 / 폴더 열기** buttons open the result when a run finishes.
 - UDI columns separate multiple values with `; `, because values can contain commas.
+- Licenses with more than one manufacturer get `제조자수` and one `제조자N_상호` / `제조자N_주소` pair per manufacturer, right after `제조자`. Names come from the search list's `제조자` column (separated by `^`); the popup address is split at ` , ` (space before the comma). If the two counts differ, the addresses are left blank and `제조자_확인필요` says why.
 
 For example, if a 125-row partial file has 120 complete rows and 5 failures, and the current search shows 227 results, recovery skips the 120 complete rows and collects the remaining 107. Keep the Chrome search filters the same as the original run. Once it finishes, use the new Excel/JSON output for subsequent work.
 
