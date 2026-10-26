@@ -16,6 +16,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 
 from recovery import build_recovery_plan, detail_complete, load_existing_records
+from manufacturers import add_manufacturer_columns
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -560,6 +561,8 @@ class CrawlWorker(QObject):
             return None
 
     def _to_excel(self, records):
+        # 이중 제조자: 제조자별 상호/주소 열 추가 (제조자 열 바로 뒤)
+        records = add_manufacturer_columns(records)
         clean = [{k:v for k,v in r.items() if not k.startswith("_")} for r in records]
         df = pd.json_normalize(clean)
 
