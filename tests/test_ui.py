@@ -30,8 +30,9 @@ class LayoutTests(unittest.TestCase):
             window.show()
             self.application.processEvents()
             self.assertGreater(window.log_table.height(), 250)
-            self.assertEqual(window.tabs.height(), 165)
-            self.assertEqual(window.btn_crawl.text(), "② 크롤링 시작")
+            self.assertEqual(window.result_stack.currentIndex(), 0)
+            self.assertTrue(window.lbl_empty.isVisible())
+            self.assertEqual(window.btn_crawl.text(), "크롤링 시작")
             self.assertEqual(window.btn_repair.text(), "누락분만 수집")
 
             window._set_stats(227, 175, 5, "12:00")
@@ -39,6 +40,7 @@ class LayoutTests(unittest.TestCase):
             self.assertEqual(window.tile_pending.text(), "대기 47")
             window._table_event(181, "수인07-157호", 0, "RUN")
             self.assertEqual(window.log_table.item(0, 3).text(), "수집 중…")
+            self.assertFalse(window.lbl_empty.isVisible())
             self.assertEqual(window.log_table.item(0, 1).background().color().name(), "#0a0a0a")
             window._table_event(181, "수인07-157호", 74, "OK")
             self.assertEqual(window.log_table.rowCount(), 1)
@@ -48,7 +50,7 @@ class LayoutTests(unittest.TestCase):
 
             window.tabs.setCurrentIndex(1)
             self.application.processEvents()
-            self.assertEqual(window.tabs.height(), 252)
+            self.assertEqual(window.result_stack.currentIndex(), 1)
             self.assertIsNotNone(window.merge_permit)
         finally:
             window.close()
@@ -62,7 +64,7 @@ class LayoutTests(unittest.TestCase):
         try:
             window.show()
             self.application.processEvents()
-            self.assertIn("color:#0a0a0a", window.lbl_status.styleSheet())
+            self.assertIn("color:white", window.lbl_status.styleSheet())  # 검은 현황 머리줄 위
             self.assertIn("color:#0a0a0a", window.lbl_pct.styleSheet())
             heading = next(label for label in window.findChildren(QLabel)
                            if label.text().startswith("크롤링 결과에 전자민원"))
@@ -82,6 +84,8 @@ class LayoutTests(unittest.TestCase):
                 window._log_table_mode = "merge"
                 window._log("병합 완료", "ok")
                 self.assertEqual(window.log_table.rowCount(), 2)
+            window._clear_log()
+            self.assertTrue(window.lbl_empty.isVisible())
         finally:
             window.close()
 
