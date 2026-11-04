@@ -1,5 +1,5 @@
 """
-eMedi 허가정보 수집기 - 의료기기 허가정보(emedi.mfds.go.kr) 크롤링 · 병합
+eMedi Crawler (의료기기 허가정보 수집기) - emedi.mfds.go.kr 허가정보 크롤링 · 병합
 Dev: Yuri Kim | 2026-10
 
 실행: python app.py
@@ -26,10 +26,12 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QSizePolicy, QStyledItemDelegate, QStyleOptionViewItem
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QUrl, QEvent
-from PyQt6.QtGui import QFont, QFontDatabase, QDesktopServices, QColor, QPainter
+from PyQt6.QtGui import QFont, QFontDatabase, QDesktopServices, QColor, QPainter, QIcon
 
 # ── Colors ────────────────────────────────────────────────
-APP_NAME  = "eMedi 허가정보 수집기"
+APP_NAME  = "eMedi Crawler"
+APP_SUBTITLE = "의료기기 허가정보 수집기"
+APP_VERSION  = "1.0.0"
 APP_DATE  = "2026-10"
 PRIMARY   = "#0047ff"
 SUCCESS   = "#00994f"
@@ -888,7 +890,7 @@ class RuledRowDelegate(QStyledItemDelegate):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(APP_NAME)
+        self.setWindowTitle(f"{APP_NAME} · {APP_SUBTITLE}")
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setMinimumSize(840, 620)
         avail = QApplication.primaryScreen().availableGeometry() if QApplication.primaryScreen() else None
@@ -932,7 +934,7 @@ class MainWindow(QMainWindow):
         tl = QHBoxLayout(title)
         tl.setContentsMargins(24, 0, 0, 0)
         tl.setSpacing(0)
-        cap = QLabel("EMEDI / 허가정보 수집기 — v1.0")
+        cap = QLabel(f"{APP_NAME.upper()} / {APP_SUBTITLE} — v{APP_VERSION}")
         cap.setStyleSheet(f"color:white; font-family:{MONO}; font-size:13px;")
         tl.addWidget(cap)
         tl.addStretch()
@@ -1030,8 +1032,9 @@ class MainWindow(QMainWindow):
         self.tile_done = self._tile("완료", "0", TEXT, "상세 수집 완료", divider=True)
         self.tile_fail = self._tile("실패", "0", DANGER, "재시도 2회 후", divider=True)
         self.tile_eta = self._tile("남은 시간", "—", TEXT, "예상", divider=True)
-        for tile in (self.tile_total, self.tile_done, self.tile_fail, self.tile_eta):
-            tiles.addWidget(tile, 1)
+        # "180/227"처럼 길어지는 진행 칸은 넓게 (세 자리 이상이면 잘리던 문제)
+        for tile, stretch in ((self.tile_total, 3), (self.tile_done, 2), (self.tile_fail, 2), (self.tile_eta, 2)):
+            tiles.addWidget(tile, stretch)
         self.tile_pending = self.tile_total.sub
         sv.addLayout(tiles)
 
@@ -1578,7 +1581,7 @@ class MainWindow(QMainWindow):
             self._log(f"파일을 찾을 수 없습니다: {path}", "err")
 
     def _set_stats(self, total, done, failed, eta):
-        self.tile_total.value.setText(f"{done+failed:,}<span style='color:{FAINT};'>/{total:,}</span>")
+        self.tile_total.value.setText(f"{done+failed:,}<span style='color:{FAINT}; font-size:26px;'>/{total:,}</span>")
         self.tile_done.value.setText(f"{done:,}")
         self.tile_fail.value.setText(f"{failed:03d}")
         self.tile_pending.setText(f"대기 {max(0, total-done-failed):,}")
@@ -1893,9 +1896,12 @@ class MainWindow(QMainWindow):
 LOG_FILE = Path.home() / "emedi_crawler.log"
 
 
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+
+
 def load_ui_fonts():
     """설치 여부에 의존하지 않도록 SIL OFL 글꼴을 앱에 등록한다."""
-    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "fonts"
+    base = RESOURCE_DIR / "fonts"
     for name in (
         "IBMPlexSansKR-Regular.woff", "IBMPlexSansKR-Medium.woff", "IBMPlexSansKR-Bold.woff",
         "IBMPlexMono-Regular.woff", "IBMPlexMono-Medium.woff", "IBMPlexMono-SemiBold.woff",
@@ -1925,6 +1931,14 @@ if __name__ == "__main__":
     app.setFont(QFont("IBM Plex Sans KR" if QFont("IBM Plex Sans KR").exactMatch() else
                       ("Apple SD Gothic Neo" if platform.system()=="Darwin" else "맑은 고딕"), 11))
     app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    app.setWindowIcon(QIcon(str(RESOURCE_DIR / "assets" / "icon.ico")))
+    if platform.system() == "Windows":
+        try:  # python.exe로 실행해도 작업 표시줄에 앱 아이콘이 보이게
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("eMediCrawler")
+        except Exception:
+            pass
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
