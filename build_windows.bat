@@ -1,19 +1,24 @@
 @echo off
 chcp 65001 >nul
-REM emedi 수집기 - Windows 앱 만들기 (이 파일을 더블클릭)
+REM eMedi Crawler - Windows 앱 만들기 (이 파일을 더블클릭)
 cd /d "%~dp0"
 python -m venv .venv || goto :err
 call .venv\Scripts\activate.bat
 python -m pip install --upgrade pip
 pip install -r requirements.txt pyinstaller || goto :err
-pyinstaller --noconfirm --clean --windowed --name "emedi_crawler" ^
+pyinstaller --noconfirm --clean --windowed --name "eMediCrawler" ^
+  --icon "assets\icon.ico" ^
   --collect-data selenium ^
   --add-data "fonts;fonts" ^
+  --add-data "assets;assets" ^
   --exclude-module tkinter --exclude-module matplotlib ^
   app.py || goto :err
+for /f "delims=" %%v in ('python -c "import app; print(app.APP_VERSION)"') do set VERSION=%%v
+powershell -NoProfile -Command "Compress-Archive -Path 'dist\eMediCrawler' -DestinationPath 'dist\eMediCrawler-v%VERSION%-windows.zip' -Force" || goto :err
 echo.
-echo 완료: dist\emedi_crawler\emedi_crawler.exe
-echo dist\emedi_crawler 폴더 전체를 원하는 곳에 두고, exe의 바로가기를 바탕화면에 만드세요.
+echo 완료: dist\eMediCrawler\eMediCrawler.exe
+echo 배포용 압축 파일: dist\eMediCrawler-v%VERSION%-windows.zip
+echo dist\eMediCrawler 폴더 전체를 원하는 곳에 두고, exe의 바로가기를 바탕화면에 만드세요.
 pause
 exit /b 0
 :err
